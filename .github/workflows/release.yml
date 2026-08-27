@@ -54,11 +54,11 @@ jobs:
               MARKETING_VERSION="$VERSION" build
           }
           XCODE_BUILD "arm64 x86_64"
-          cp -R build/DerivedData/Build/Products/Release/DJOneHub.app dist/DJOneHub.app
+          cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative.app
           XCODE_BUILD "arm64"
-          cp -R build/DerivedData/Build/Products/Release/DJOneHub.app dist/DJOneHub-arm64.app
+          cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative-arm64.app
           XCODE_BUILD "x86_64"
-          cp -R build/DerivedData/Build/Products/Release/DJOneHub.app dist/DJOneHub-x86_64.app
+          cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative-x86_64.app
 
       - name: Verify macOS deployment target
         run: |
@@ -91,10 +91,10 @@ jobs:
           }
 
           for app in \
-            dist/DJOneHub.app \
-            dist/DJOneHub-arm64.app \
-            dist/DJOneHub-x86_64.app; do
-            check_minos "$app/Contents/MacOS/DJOneHub"
+            dist/DJ4GNative.app \
+            dist/DJ4GNative-arm64.app \
+            dist/DJ4GNative-x86_64.app; do
+            check_minos "$app/Contents/MacOS/DJ4GNative"
             check_minos "$app/Contents/Resources/backend/djonehubd"
             check_minos "$app/Contents/Resources/backend/djonehub"
             check_minos "$app/Contents/Resources/backend/djonehub-routing-helper"
@@ -137,11 +137,11 @@ jobs:
           pipx install dmgbuild
           export PATH="$HOME/.local/bin:$PATH"
           for VARIANT in "" "-arm64" "-x86_64"; do
-            APP="DJOneHub${VARIANT}.app"
+            APP="DJ4GNative${VARIANT}.app"
             [ -d "dist/$APP" ] || continue
-            DMG="DJOneHub-${{ github.ref_name }}${VARIANT}.dmg"
-            sed "s|DJOneHub-arm64.app|$APP|" scripts/dmgbuild.json > "/tmp/dmgbuild${VARIANT}.json"
-            dmgbuild -s "/tmp/dmgbuild${VARIANT}.json" "DJOneHub" "dist/$DMG"
+            DMG="DJ4GNative-${{ github.ref_name }}${VARIANT}.dmg"
+            sed "s|DJ4GNative-arm64.app|$APP|" scripts/dmgbuild.json > "/tmp/dmgbuild${VARIANT}.json"
+            dmgbuild -s "/tmp/dmgbuild${VARIANT}.json" "DJ4GNative" "dist/$DMG"
             echo "created dist/$DMG"
           done
 
@@ -171,9 +171,9 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           files: |
-            dist/DJOneHub-${{ github.ref_name }}.dmg
-            dist/DJOneHub-${{ github.ref_name }}-arm64.dmg
-            dist/DJOneHub-${{ github.ref_name }}-x86_64.dmg
+            dist/DJ4GNative-${{ github.ref_name }}.dmg
+            dist/DJ4GNative-${{ github.ref_name }}-arm64.dmg
+            dist/DJ4GNative-${{ github.ref_name }}-x86_64.dmg
             dist/sing-box-1.13.16-source.tar.gz
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: ${{ steps.release.outputs.exists != 'true' }}

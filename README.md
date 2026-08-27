@@ -80,7 +80,7 @@ DJOneHub 是大疆第一代 4G 模块管理工具的原生 macOS 重制版。Swi
 
 从 [GitHub Releases](https://github.com/cr-zhichen/DJOneHubNative/releases) 下载适合当前架构的 DMG，将 App 拖入“应用程序”文件夹即可。发行版采用 ad-hoc 签名且未公证；若首次启动提示“无法验证开发者”，请先尝试打开一次，再前往“系统设置 → 隐私与安全性”点击“仍要打开”。
 
-应用启动时会自动启动后端服务；关闭主窗口后仍在菜单栏运行，通过“退出 DJOneHub”才会停止服务。应用分流默认关闭，独立分流首次启用或更新权限服务时需要管理员授权。
+应用启动时会自动启动后端服务；关闭主窗口后仍在菜单栏运行，通过“退出 DJ4GNative”才会停止服务。应用分流默认关闭，独立分流首次启用或更新权限服务时需要管理员授权。
 
 运行日志位于 `~/Library/Application Support/DJOneHubNative/djonehub.log`。故障切换与网络诊断日志位于同目录下的 `djonehub-diagnostic.log`；自动切换状态保存在 `network-failover.json`。
 

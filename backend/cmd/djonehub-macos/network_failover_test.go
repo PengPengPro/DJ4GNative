@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestPromoteService(t *testing.T) {
 	got := promoteService([]string{"Wi-Fi", "Baiwang", "USB 10/100/1000 LAN"}, "Baiwang")
@@ -93,5 +96,40 @@ func TestUnderlayPreferredOrderPinsOverlay(t *testing.T) {
 	want := []string{"Wi-Fi", "DJ-4G", "Quantumult X"}
 	if !sameStringSlice(got, want) {
 		t.Fatalf("got %v want %v", got, want)
+	}
+}
+
+func TestParseAirportNetworkAssociated(t *testing.T) {
+	if parseAirportNetworkAssociated("You are not associated with an AirPort network.\n") {
+		t.Fatal("not associated should be false")
+	}
+	if !parseAirportNetworkAssociated("Current Wi-Fi Network: ZSKJ\n") {
+		t.Fatal("Current Wi-Fi Network should be true")
+	}
+	if !parseAirportNetworkAssociated("Wi-Fi Network: Home\n") {
+		t.Fatal("Wi-Fi Network should be true")
+	}
+}
+
+func TestBackupUnderlayAliveMissingDevice(t *testing.T) {
+	ctx := context.Background()
+	svc := networkService{Name: "DJ-4G", Device: "en99999", Module: true}
+	if backupUnderlayAlive(ctx, svc) {
+		t.Fatal("missing device must be considered dead")
+	}
+	if underlayDevicePresent("en99999") {
+		t.Fatal("en99999 should not be present")
+	}
+	if backupUnderlayAlive(ctx, networkService{}) {
+		t.Fatal("empty service must be dead")
+	}
+}
+
+func TestNetworkFailoverProbeTargetsPreferDomesticDNS(t *testing.T) {
+	if len(networkFailoverProbeTargets4) < 3 {
+		t.Fatal("expected domestic-friendly probe targets")
+	}
+	if networkFailoverProbeTargets4[0] != "223.5.5.5:53" {
+		t.Fatalf("first probe target = %s, want 223.5.5.5:53", networkFailoverProbeTargets4[0])
 	}
 }

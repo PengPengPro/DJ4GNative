@@ -20,9 +20,13 @@ import (
 
 const (
 	networkFailoverStateFile    = "network-failover.json"
-	networkFailoverInterval     = 3 * time.Second
+	networkFailoverInterval     = 2 * time.Second
 	networkFailoverProbeTimeout = 2 * time.Second
-	networkFailoverFailNeed     = 2 // 主网卡仍在线但无外网时，连续失败次数后再切
+	// 第一优先级连续不可用超过该时长后，按 preferred 顺序向下切换。
+	networkFailoverFailAfter = 5 * time.Second
+	// 备选上网时，第一优先级须连续可用超过该时长才切回。
+	networkFailoverRestoreAfter = 5 * time.Second
+	cellularMaintainInterval    = 60 * time.Second
 	// 软重启慢且会占用 AT 口；优先快修，软重启冷却要更长。
 	cellularSoftRebootCooldown = 5 * time.Minute
 	cellularFastRepairCooldown = 25 * time.Second
@@ -42,6 +46,7 @@ type networkFailoverStatus struct {
 	PathKind       string   `json:"path_kind,omitempty"`  // wifi | cellular | ethernet | vpn | unknown
 	PathLabel      string   `json:"path_label,omitempty"` // 展示名
 	UsingPreferred bool     `json:"using_preferred"`
+	UsingBackup    bool     `json:"using_backup,omitempty"`
 	HelperReady    bool     `json:"helper_ready"`
 	Message        string   `json:"message,omitempty"`
 	PrimaryOnline  *bool    `json:"primary_online,omitempty"`
@@ -54,17 +59,23 @@ type networkFailoverController struct {
 	enabled   bool
 	preferred []string
 
-	primaryFailStreak int
-	lastMessage       string
-	primaryOnline     *bool
-	activeService     string
-	activeDevice      string
-	pathKind          string
-	pathLabel         string
+	lastMessage   string
+	primaryOnline *bool
+	activeService string
+	activeDevice  string
+	pathKind      string
+	pathLabel     string
+
+	// 时间窗：主网连续不可用 / 连续可用，用于 5 秒切出与切回。
+	primaryDownSince    time.Time
+	primaryHealthySince time.Time
+	activeUnderlayName  string // 当前实际在用的底层（含备选）
 
 	lastCellularRepair     time.Time // 软重启时间戳
 	lastCellularFastRepair time.Time // ARP/PDP/射频快修时间戳
+	lastCellularMaintain   time.Time
 	lastOverlayBounce      time.Time
+	pendingOverlayBounce   bool // 备选底层就绪后再弹一次代理
 	// 当前是否处于「已切到备选底层」模式；用于避免每轮重复弹代理 / 重复修复
 	usingBackup bool
 
@@ -205,42 +216,68 @@ func (a *app) networkFailoverTick(ctx context.Context) {
 	for _, s := range services {
 		byName[s.Name] = s
 	}
-	primary := ""
-	for _, name := range preferred {
-		svc := byName[name]
-		if isOverlayNetworkService(svc) {
-			continue
-		}
-		primary = name
-		break
-	}
-	if primary == "" {
+	underlays := preferredUnderlayServices(preferred, byName)
+	if len(underlays) == 0 {
 		a.setFailoverMessage("首选顺序里没有可用的底层网卡（Wi‑Fi/4G/有线）")
 		return
 	}
-	primarySvc := byName[primary]
-	primaryReady := interfaceLinkReady(primarySvc.Device)
-	primaryOK := underlayHealthy(ctx, primarySvc)
-	if !primaryReady {
-		primaryOK = false
-	}
+	primarySvc := underlays[0]
+	primary := primarySvc.Name
+	primaryOK := primaryUnderlayOnline(ctx, primarySvc)
 
+	now := time.Now()
 	ctrl.mu.Lock()
-	ctrl.primaryOnline = boolPtr(primaryOK)
+	usingBackup := ctrl.usingBackup
 	if primaryOK {
-		ctrl.primaryFailStreak = 0
+		ctrl.primaryDownSince = time.Time{}
+		if ctrl.primaryHealthySince.IsZero() {
+			ctrl.primaryHealthySince = now
+		}
 	} else {
-		ctrl.primaryFailStreak++
-		// 主网卡链路已断：立刻满足切换门槛，不必再等第二次
-		if !primaryReady {
-			ctrl.primaryFailStreak = networkFailoverFailNeed
+		ctrl.primaryHealthySince = time.Time{}
+		if ctrl.primaryDownSince.IsZero() {
+			ctrl.primaryDownSince = now
 		}
 	}
-	failStreak := ctrl.primaryFailStreak
+	ctrl.primaryOnline = boolPtr(primaryOK)
+	downFor := time.Duration(0)
+	healthyFor := time.Duration(0)
+	if !ctrl.primaryDownSince.IsZero() {
+		downFor = now.Sub(ctrl.primaryDownSince)
+	}
+	if !ctrl.primaryHealthySince.IsZero() {
+		healthyFor = now.Sub(ctrl.primaryHealthySince)
+	}
 	ctrl.mu.Unlock()
 
 	currentNames := serviceNames(services)
+
+	// —— 第一优先级可用：满足恢复时长后切回 ——
 	if primaryOK {
+		if usingBackup {
+			stay := a.currentBackupUnderlay(underlays)
+			backupAlive := backupUnderlayAlive(ctx, stay)
+			if !backupAlive {
+				// 备选底层已挂（常见：4G USB enX 消失），主网又可用：立刻切回，
+				// 绝不能继续顶着死网卡空等「恢复中」导致整机没网。
+				a.failoverLog("network failover: backup %s dead while primary %s online; restore immediately",
+					stay.Name, primary)
+			} else if healthyFor < networkFailoverRestoreAfter {
+				target := promoteUnderlayKeepingOverlay(preferred, stay.Name, services)
+				if stay.Name != "" && !sameStringSlice(currentNames, target) {
+					if err := applyNetworkServicesOrderSilent(ctx, target); err != nil {
+						a.failoverLog("network failover: keep backup order failed: %v", err)
+					} else {
+						a.failoverLog("network failover: keep underlay on %s until primary stable (%.0fs/%.0fs)",
+							stay.Name, healthyFor.Seconds(), networkFailoverRestoreAfter.Seconds())
+					}
+				}
+				a.setFailoverPathWithOverlay(services, stay,
+					fmt.Sprintf("已用 %s 上网；%s 恢复中（%.0f/%.0f 秒）",
+						stay.Name, primary, healthyFor.Seconds(), networkFailoverRestoreAfter.Seconds()))
+				return
+			}
+		}
 		msg := "主网卡可用，保持首选顺序"
 		target := underlayPreferredOrder(preferred, services)
 		restored := false
@@ -252,13 +289,16 @@ func (a *app) networkFailoverTick(ctx context.Context) {
 			}
 			restored = true
 			msg = "主网卡已恢复，已切回第一优先级（VPN/代理继续使用）"
-			a.failoverLog("network failover: restored preferred underlay, primary=%s", primary)
+			a.failoverLog("network failover: restored preferred underlay, primary=%s (healthy=%.0fs)",
+				primary, healthyFor.Seconds())
 		}
 		ctrl.mu.Lock()
 		wasBackup := ctrl.usingBackup
 		ctrl.usingBackup = false
+		ctrl.activeUnderlayName = primary
+		ctrl.pendingOverlayBounce = false
+		ctrl.primaryHealthySince = time.Time{}
 		ctrl.mu.Unlock()
-		// 只在真正从备选切回时弹一次代理；平时主网卡健康不要动 Quantumult
 		if restored || wasBackup {
 			if bounceOverlayNetworkServices(ctx, services) {
 				msg += "（已触发代理重绑底层）"
@@ -270,10 +310,42 @@ func (a *app) networkFailoverTick(ctx context.Context) {
 		return
 	}
 
-	if failStreak < networkFailoverFailNeed {
-		a.setFailoverPathWithOverlay(services, primarySvc,
-			fmt.Sprintf("主网卡暂不可用（%d/%d），继续观察", failStreak, networkFailoverFailNeed))
-		return
+	// —— 第一优先级不可用：若正挂在已死的备选上，马上修备选，别只干等 ——
+	if usingBackup {
+		stay := a.currentBackupUnderlay(underlays)
+		if stay.Name != "" && !backupUnderlayAlive(ctx, stay) {
+			a.failoverLog("network failover: active backup %s died while primary %s still down", stay.Name, primary)
+			if looksLikeCellularService(stay) || stay.Module {
+				a.setFailoverPathWithOverlay(services, stay,
+					fmt.Sprintf("备选 %s USB/网关已断开，正在抢修；主网卡仍不可用", stay.Name))
+				if stay.Device != "" {
+					dev := stay.Device
+					go a.ensureCellularUnderlayAddressOpts(dev, true)
+				}
+			} else {
+				a.setFailoverPathWithOverlay(services, stay,
+					fmt.Sprintf("备选 %s 已不可用，正在寻找其他出口", stay.Name))
+			}
+			// 继续往下走：尝试下一优先级 / sticky 修复
+		}
+	}
+
+	// —— 第一优先级不可用：未满 5 秒只观察（备选仍活着时）——
+	if downFor < networkFailoverFailAfter {
+		if usingBackup {
+			stay := a.currentBackupUnderlay(underlays)
+			if backupUnderlayAlive(ctx, stay) {
+				a.setFailoverPathWithOverlay(services, stay,
+					fmt.Sprintf("已用 %s 上网；主网卡暂不可用（%.0f/%.0f 秒）",
+						stay.Name, downFor.Seconds(), networkFailoverFailAfter.Seconds()))
+				return
+			}
+		} else {
+			a.setFailoverPathWithOverlay(services, primarySvc,
+				fmt.Sprintf("主网卡暂不可用（%.0f/%.0f 秒），继续观察",
+					downFor.Seconds(), networkFailoverFailAfter.Seconds()))
+			return
+		}
 	}
 
 	if !networkOrderServiceInstalled() {
@@ -281,43 +353,38 @@ func (a *app) networkFailoverTick(ctx context.Context) {
 		return
 	}
 
-	// 只在底层网卡中选备选；Quantumult 等 VPN 是覆盖层，不是备选出口。
-	var backup networkService
-	var backupProbed bool
-	for _, name := range preferred[1:] {
-		svc, ok := byName[name]
-		if !ok || isOverlayNetworkService(svc) || !interfaceFailoverCandidate(svc) {
+	// —— 按优先级 2、3… 依次尝试 ——
+	// 只有「探测确认可用」的更低优先级才能抢走蜂窝备选；否则死守 DJ-4G 并继续快修。
+	var chosen networkService
+	var chosenProbed bool
+	var stickyCellular networkService
+	for i := 1; i < len(underlays); i++ {
+		svc := underlays[i]
+		if !interfaceFailoverCandidate(svc) {
 			continue
 		}
-		// 已在备选模式且 USB 仍通时，不要每 3 秒都折腾修复
-		ctrl.mu.Lock()
-		alreadyBackup := ctrl.usingBackup
-		ctrl.mu.Unlock()
 		needRepair := looksLikeCellularService(svc) || svc.Module
-		if needRepair && (!alreadyBackup || !cellularUSBPathReady(svc.Device)) {
-			a.ensureCellularUnderlayAddress(svc.Device)
-			if updated, err := macNetworkServiceOrder(moduleProduct); err == nil {
-				services = updated
-				byName = map[string]networkService{}
-				for _, s := range services {
-					byName[s.Name] = s
-				}
-				if s, ok := byName[name]; ok {
-					svc = s
-				}
-			}
+		if needRepair && !cellularUSBPathReady(svc.Device) {
+			_ = flushARPAndNudge(svc.Device)
 		}
 		if underlayHealthy(ctx, svc) {
-			backup = svc
-			backupProbed = true
+			chosen = svc
+			chosenProbed = true
 			break
 		}
-		if backup.Name == "" && interfaceLinkReady(svc.Device) {
-			backup = svc
+		if needRepair && (interfaceLinkReady(svc.Device) || deviceHasUsableIPv4(svc.Device) || interfaceMediaActive(svc.Device)) {
+			if stickyCellular.Name == "" {
+				stickyCellular = svc
+			}
+			continue
 		}
 	}
-	if backup.Name == "" {
-		detail := describeUnusableBackups(preferred[1:], byName)
+	if chosen.Name == "" {
+		chosen = stickyCellular
+		chosenProbed = false
+	}
+	if chosen.Name == "" {
+		detail := describeUnusableBackups(preferredUnderlayNames(underlays[1:]), byName)
 		msg := "主网卡与备选底层网卡均无法使用，保持当前顺序"
 		if detail != "" {
 			msg = "无法切换：" + detail
@@ -330,19 +397,17 @@ func (a *app) networkFailoverTick(ctx context.Context) {
 		return
 	}
 
-	// 若选中的备选仍无「可用 USB 上网路径」（IPv4 + 网关可达），再强拉一次后仍失败则不要假装切换成功
-	if looksLikeCellularService(backup) || backup.Module {
-		if !cellularUSBPathReady(backup.Device) {
-			a.ensureCellularUnderlayAddress(backup.Device)
-		}
-		if !cellularUSBPathReady(backup.Device) {
-			a.setFailoverMessage("无法用 " + backup.Name + " 上网：模块 USB 网关不可达（假活 IP / ARP 失败）。可在「调试与诊断」复制日志，或点首页重启模块")
-			a.failoverLog("network failover: backup %s USB path not ready (ipv4=%v)", backup.Name, deviceHasUsableIPv4(backup.Device))
-			return
-		}
+	// Wi‑Fi 网关仍通时，禁止把「未探测成功」的蜂窝 sticky 顶上去。
+	// getairportnetwork 误报未关联时，否则会在 Wi‑Fi 正常时误切 4G。
+	if !chosenProbed && looksLikeWiFiService(primarySvc) && underlayGatewayReachable(primarySvc.Device) {
+		a.setFailoverPathWithOverlay(services, primarySvc,
+			fmt.Sprintf("主网卡网关仍可达，暂不切换到未确认的备选 %s", chosen.Name))
+		a.failoverLog("network failover: skip unprobed backup %s; primary %s gateway still reachable",
+			chosen.Name, primary)
+		return
 	}
 
-	target := promoteUnderlayKeepingOverlay(preferred, backup.Name, services)
+	target := promoteUnderlayKeepingOverlay(preferred, chosen.Name, services)
 	promoted := false
 	if !sameStringSlice(currentNames, target) {
 		if err := applyNetworkServicesOrderSilent(ctx, target); err != nil {
@@ -351,33 +416,208 @@ func (a *app) networkFailoverTick(ctx context.Context) {
 			return
 		}
 		promoted = true
-		a.failoverLog("network failover: promoted underlay=%s probed=%v (primary=%s offline); overlay VPN untouched",
-			backup.Name, backupProbed, primary)
+		a.failoverLog("network failover: promoted underlay=%s probed=%v (primary=%s offline %.0fs); overlay VPN untouched",
+			chosen.Name, chosenProbed, primary, downFor.Seconds())
 	}
 
 	ctrl.mu.Lock()
 	wasBackup := ctrl.usingBackup
 	ctrl.usingBackup = true
+	ctrl.activeUnderlayName = chosen.Name
+	if promoted || !wasBackup {
+		// 等底层真正可用后再弹代理，避免 QX 绑到假活 Wi‑Fi / 未就绪 USB。
+		ctrl.pendingOverlayBounce = true
+	}
 	ctrl.mu.Unlock()
 
-	msg := "主网卡不可用，底层已切到：" + backup.Name
-	if !backupProbed {
-		msg += "（链路可用，健康探测未完全确认）"
+	msg := fmt.Sprintf("主网卡不可用已超过 %.0f 秒，底层已切到：%s", networkFailoverFailAfter.Seconds(), chosen.Name)
+	if !chosenProbed {
+		msg += "（正在确认/修复上网路径）"
 	}
 	if overlay := firstOverlayService(services); overlay.Name != "" {
 		msg += "；" + overlay.Name + " 继续作为上层代理"
-		// 关键：只在刚提升顺序或首次进入备选时弹一次代理。
-		// 之前每个 tick 都 bounce，会把 Quantumult / USB 网关打挂。
-		if promoted || !wasBackup {
-			if bounceOverlayNetworkServices(ctx, services) {
-				msg += "（已触发代理重绑底层）"
-				a.noteOverlayBounce()
-				a.failoverLog("network failover: bounced overlay once after promote to %s", backup.Name)
+	}
+	a.setFailoverPathWithOverlay(services, chosen, msg)
+
+	if looksLikeCellularService(chosen) || chosen.Module {
+		if cellularUSBPathReady(chosen.Device) || systemHasInternet() {
+			a.maybeBounceOverlayAfterUnderlayReady(services, chosen.Name)
+			return
+		}
+		ctrl.mu.Lock()
+		repairDue := ctrl.lastCellularFastRepair.IsZero() ||
+			time.Since(ctrl.lastCellularFastRepair) >= cellularFastRepairCooldown
+		ctrl.mu.Unlock()
+		if !repairDue {
+			return
+		}
+		dev := chosen.Device
+		name := chosen.Name
+		go func() {
+			// 允许软重启：此时备选本身上不了网，软重启是恢复 ARP 的最后手段。
+			a.ensureCellularUnderlayAddressOpts(dev, true)
+			moduleProduct := ""
+			if usb := a.currentUSBDevice(); usb != nil {
+				moduleProduct = usb.Product
+			}
+			svcs, err := macNetworkServiceOrder(moduleProduct)
+			if err != nil {
+				svcs = services
+			}
+			a.maybeBounceOverlayAfterUnderlayReady(svcs, name)
+			// 网关仍假活时也弹一次：服务顺序已是 DJ-4G 优先，代理重绑常是「手动切 4G 能上网」的关键一步。
+			if ctrl := a.networkFailover; ctrl != nil {
+				ctrl.mu.Lock()
+				pending := ctrl.pendingOverlayBounce
+				ctrl.mu.Unlock()
+				if pending {
+					a.failoverLog("network failover: underlay %s gateway still not ready; bouncing overlay on new order anyway", name)
+					bctx, bcancel := context.WithTimeout(context.Background(), 15*time.Second)
+					if bounceOverlayNetworkServices(bctx, svcs) {
+						ctrl.mu.Lock()
+						ctrl.pendingOverlayBounce = false
+						ctrl.mu.Unlock()
+						a.noteOverlayBounce()
+						a.setFailoverMessage("已按备选顺序触发代理重绑（底层仍在修复）")
+					}
+					bcancel()
+				}
+			}
+		}()
+		return
+	}
+	a.maybeBounceOverlayAfterUnderlayReady(services, chosen.Name)
+}
+
+func (a *app) maybeBounceOverlayAfterUnderlayReady(services []networkService, underlayName string) {
+	ctrl := a.networkFailover
+	if ctrl == nil {
+		return
+	}
+	ctrl.mu.Lock()
+	pending := ctrl.pendingOverlayBounce
+	using := ctrl.usingBackup
+	active := ctrl.activeUnderlayName
+	ctrl.mu.Unlock()
+	if !pending || !using {
+		return
+	}
+	if active != "" && underlayName != "" && active != underlayName {
+		return
+	}
+	// 注意：不能要求 systemHasInternet()——代理仍绑着假活 Wi‑Fi 时系统必然没网。
+	// 只要备选底层自身路径就绪（蜂窝网关可 ping / 或该网卡公网探测通），就弹一次代理。
+	if !underlayReadyForOverlayBounce(services, underlayName) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if bounceOverlayNetworkServices(ctx, services) {
+		ctrl.mu.Lock()
+		ctrl.pendingOverlayBounce = false
+		ctrl.mu.Unlock()
+		a.noteOverlayBounce()
+		a.failoverLog("network failover: bounced overlay after underlay %s became usable", underlayName)
+		a.setFailoverMessage("备选底层已可用，已触发代理重绑")
+	}
+}
+
+func underlayReadyForOverlayBounce(services []networkService, underlayName string) bool {
+	for _, svc := range services {
+		if underlayName != "" && svc.Name != underlayName {
+			continue
+		}
+		if isOverlayNetworkService(svc) || svc.Device == "" {
+			continue
+		}
+		if looksLikeCellularService(svc) || svc.Module {
+			if cellularUSBPathReady(svc.Device) {
+				return true
+			}
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), networkFailoverProbeTimeout)
+		ok := underlayHealthy(ctx, svc)
+		cancel()
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func preferredUnderlayServices(preferred []string, byName map[string]networkService) []networkService {
+	var out []networkService
+	for _, name := range preferred {
+		svc, ok := byName[name]
+		if !ok || isOverlayNetworkService(svc) {
+			continue
+		}
+		out = append(out, svc)
+	}
+	return out
+}
+
+func preferredUnderlayNames(underlays []networkService) []string {
+	names := make([]string, 0, len(underlays))
+	for _, svc := range underlays {
+		names = append(names, svc.Name)
+	}
+	return names
+}
+
+func (a *app) currentBackupUnderlay(underlays []networkService) networkService {
+	if len(underlays) == 0 {
+		return networkService{}
+	}
+	ctrl := a.networkFailover
+	name := ""
+	if ctrl != nil {
+		ctrl.mu.Lock()
+		name = ctrl.activeUnderlayName
+		ctrl.mu.Unlock()
+	}
+	if name != "" {
+		for _, svc := range underlays {
+			if svc.Name == name {
+				return svc
 			}
 		}
 	}
+	if len(underlays) > 1 {
+		return underlays[1]
+	}
+	return underlays[0]
+}
 
-	a.setFailoverPathWithOverlay(services, backup, msg)
+// underlayDevicePresent：networksetup 仍可能报 Device: en8，但 ifconfig 已不存在。
+func underlayDevicePresent(device string) bool {
+	device = strings.TrimSpace(device)
+	if device == "" {
+		return false
+	}
+	_, err := net.InterfaceByName(device)
+	return err == nil
+}
+
+// backupUnderlayAlive：当前备选是否还能当真上网通道。
+// 4G USB 掉线（enX 消失）必须判死，否则会卡在「已用 DJ-4G」却完全没网。
+func backupUnderlayAlive(ctx context.Context, svc networkService) bool {
+	if svc.Name == "" || svc.Device == "" || isOverlayNetworkService(svc) {
+		return false
+	}
+	if !underlayDevicePresent(svc.Device) {
+		return false
+	}
+	if looksLikeCellularService(svc) || svc.Module {
+		if cellularUSBPathReady(svc.Device) {
+			return true
+		}
+		// 网关暂时假活时，仍要求网卡存在且 media active，避免把失踪 USB 当活备选。
+		return interfaceMediaActive(svc.Device) && deviceHasUsableIPv4(svc.Device) &&
+			underlayHealthy(ctx, svc)
+	}
+	return underlayHealthy(ctx, svc)
 }
 
 func (a *app) noteOverlayBounce() {
@@ -452,6 +692,7 @@ func (a *app) failoverStatusSnapshot() networkFailoverStatus {
 		status.PathKind = ctrl.pathKind
 		status.PathLabel = ctrl.pathLabel
 		status.PrimaryOnline = cloneBoolPtr(ctrl.primaryOnline)
+		status.UsingBackup = ctrl.usingBackup
 		ctrl.mu.Unlock()
 	}
 
@@ -464,7 +705,11 @@ func (a *app) failoverStatusSnapshot() networkFailoverStatus {
 		return status
 	}
 	status.Current = serviceNames(services)
-	status.UsingPreferred = len(status.Preferred) > 0 && sameStringSlice(status.Current, status.Preferred)
+	if status.UsingBackup {
+		status.UsingPreferred = false
+	} else {
+		status.UsingPreferred = len(status.Preferred) > 0 && sameStringSlice(status.Current, status.Preferred)
+	}
 
 	route := discoverMacDefaultRoute()
 	underlay := firstUnderlayService(services)
@@ -567,7 +812,10 @@ func (a *app) setNetworkFailover(w http.ResponseWriter, r *http.Request) {
 	}
 	ctrl.mu.Lock()
 	ctrl.enabled = true
-	ctrl.primaryFailStreak = 0
+	ctrl.primaryDownSince = time.Time{}
+	ctrl.primaryHealthySince = time.Time{}
+	ctrl.activeUnderlayName = ""
+	ctrl.pendingOverlayBounce = false
 	ctrl.usingBackup = false
 	ctrl.lastMessage = "自动切换已开启"
 	ctrl.save()
@@ -916,8 +1164,109 @@ func looksLikeCellularService(svc networkService) bool {
 	return false
 }
 
+func preferredBackupUnderlay(preferred []string, byName map[string]networkService) networkService {
+	if len(preferred) < 2 {
+		return networkService{}
+	}
+	for _, name := range preferred[1:] {
+		svc := byName[name]
+		if isOverlayNetworkService(svc) {
+			continue
+		}
+		return svc
+	}
+	return networkService{}
+}
+
+// primaryUnderlayOnline：第一优先级是否真的能当上游。
+// Wi‑Fi 常见坑：
+// 1) 电源开着但未关联，仍残留 IPv4 + status:active；
+// 2) networksetup -getairportnetwork 在已连接时仍误报 "You are not associated"
+//    （system_profiler 显示 Connected）——不能把该字符串当硬条件，否则会误切 4G。
+// 3) 切到 4G 后若 USB 掉线，绝不能因为 Wi‑Fi「假恢复」空等，见 backupUnderlayAlive。
+func primaryUnderlayOnline(ctx context.Context, svc networkService) bool {
+	if svc.Device == "" || isOverlayNetworkService(svc) {
+		return false
+	}
+	if !underlayDevicePresent(svc.Device) {
+		return false
+	}
+	if !interfaceLinkReady(svc.Device) || !interfaceMediaActive(svc.Device) {
+		return false
+	}
+	if looksLikeWiFiService(svc) {
+		// 电源关闭 = 明确离线。Control Center 关 Wi‑Fi 必须走这条，不能靠 association 字符串。
+		if !wifiAirportPowerOn(svc.Device) {
+			return false
+		}
+		// 真正未关联时网关通常 ping 不通；用网关可达替代不可靠的 association 字符串。
+		if !underlayGatewayReachable(svc.Device) {
+			return false
+		}
+	}
+	return underlayHealthy(ctx, svc)
+}
+
+func looksLikeWiFiService(svc networkService) bool {
+	kind, _ := classifyNetworkPath(svc)
+	return kind == "wifi"
+}
+
+func wifiAirportPowerOn(device string) bool {
+	device = strings.TrimSpace(device)
+	if device == "" {
+		return false
+	}
+	out, err := exec.Command("networksetup", "-getairportpower", device).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	s := strings.ToLower(string(out))
+	if strings.Contains(s, "off") {
+		return false
+	}
+	return strings.Contains(s, "on")
+}
+
+// wifiAssociatedStrict 只信 networksetup 的 SSID 输出（可能误报未关联）。
+func wifiAssociatedStrict(device string) bool {
+	device = strings.TrimSpace(device)
+	if device == "" {
+		return false
+	}
+	out, err := exec.Command("networksetup", "-getairportnetwork", device).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return parseAirportNetworkAssociated(string(out))
+}
+
+func parseAirportNetworkAssociated(output string) bool {
+	if strings.Contains(strings.ToLower(output), "not associated") {
+		return false
+	}
+	return strings.Contains(output, "Current Wi-Fi Network:") ||
+		strings.Contains(output, "Wi-Fi Network:")
+}
+
+// wifiAssociated：SSID 字符串或「电源开 + 网关可达」任一成立即视为已连接。
+func wifiAssociated(device string) bool {
+	if wifiAssociatedStrict(device) {
+		return true
+	}
+	return wifiAirportPowerOn(device) && underlayGatewayReachable(device)
+}
+
+func underlayGatewayReachable(device string) bool {
+	gw := interfaceIPv4Gateway(device)
+	if gw == nil {
+		return false
+	}
+	return pingViaInterface(device, gw.String())
+}
+
 // underlayHealthy 判断底层网卡能否作为 VPN/系统上游。
-// 开着 Quantumult 时不能用直连 1.1.1.1 判断；优先看 IPv4 + 网关可达。
+// Wi‑Fi / 有线必须：关联（Wi‑Fi）+ 网关可达 + 公网探测；切回主网绝不能只看残留局域网地址。
 func underlayHealthy(ctx context.Context, svc networkService) bool {
 	if svc.Device == "" || isOverlayNetworkService(svc) {
 		return false
@@ -926,30 +1275,28 @@ func underlayHealthy(ctx context.Context, svc networkService) bool {
 	if err != nil || iface.Flags&net.FlagUp == 0 {
 		return false
 	}
-	ip4 := ipv4OfInterface(iface)
-	if ip4 == nil {
-		// 仅有 IPv6 时：对依赖 IPv4 上游的代理通常不够
+	if !interfaceMediaActive(svc.Device) {
 		return false
 	}
-	// 模块 USB 网：必须网关真实可达，否则会出现「有 192.168.225.x 但 ARP incomplete」假活
+	if ipv4OfInterface(iface) == nil && ipv6OfInterface(iface) == nil {
+		return false
+	}
 	if looksLikeCellularService(svc) || svc.Module {
-		return cellularUSBPathReady(svc.Device)
-	}
-	gw := interfaceIPv4Gateway(svc.Device)
-	if gw != nil {
-		if probeTCPViaInterface(ctx, "tcp4", net.JoinHostPort(gw.String(), "53"), iface.Index, &net.TCPAddr{IP: ip4}) {
+		if cellularUSBPathReady(svc.Device) {
 			return true
 		}
-		if pingViaInterface(svc.Device, gw.String()) {
-			return true
-		}
-		// 普通 Wi‑Fi/有线：有 IPv4 + 网关路由也视为可用
-		return true
-	}
-	if !defaultRouteIsVPN(discoverMacDefaultRoute().Interface) {
 		return probeInterfaceInternet(ctx, svc.Device)
 	}
-	return true
+	if looksLikeWiFiService(svc) {
+		// 不把 getairportnetwork 误报当硬失败；电源关才直接判死。
+		if !wifiAirportPowerOn(svc.Device) {
+			return false
+		}
+	}
+	if !underlayGatewayReachable(svc.Device) {
+		return false
+	}
+	return probeInterfaceInternet(ctx, svc.Device)
 }
 
 func deviceHasIPv4(device string) bool {
@@ -989,6 +1336,11 @@ func (a *app) ensureCellularUnderlayAddressOpts(device string, allowSoftReboot b
 	if device == "" {
 		return
 	}
+	if !underlayDevicePresent(device) {
+		a.failoverLog("network failover: %s interface missing; skip repair until USB reappears", device)
+		a.setFailoverMessage("4G USB 网卡已消失（" + device + "），请检查模块供电/线缆；主网可用时会立即切回")
+		return
+	}
 	if cellularUSBPathReady(device) {
 		// 网关通但仍无外网：只做 PDP 快修，不软重启
 		if !probeInterfaceInternet(context.Background(), device) {
@@ -1006,7 +1358,7 @@ func (a *app) ensureCellularUnderlayAddressOpts(device string, allowSoftReboot b
 	}
 
 	if !allowSoftReboot {
-		a.setFailoverMessage("快速修复未恢复 " + device + "，主网卡仍可用，暂不软重启")
+		a.setFailoverMessage("快速修复未恢复 " + device + "，暂不软重启以免中断正在使用的 4G")
 		return
 	}
 	if inCooldown, remaining := a.cellularSoftRebootInCooldown(); inCooldown {
@@ -1017,11 +1369,17 @@ func (a *app) ensureCellularUnderlayAddressOpts(device string, allowSoftReboot b
 	a.repairCellularViaModuleRebootAsync(device, "fast repair exhausted")
 }
 
-// fastRepairCellularUSB：不重启模块的快捷恢复（通常数秒到十几秒）。
+// fastRepairCellularUSB：不重启模块的快捷恢复。
+// 主网卡已挂时仍做 ARP + PDP（否则会长期停在「有地址但 ARP incomplete」假活）；
+// 仅跳过更重的射频开关 / 软重启，避免把正在顶上的 4G 再掐死。
 func (a *app) fastRepairCellularUSB(device string) bool {
 	ctrl := a.networkFailover
+	primaryDown := false
 	if ctrl != nil {
 		ctrl.mu.Lock()
+		if ctrl.primaryOnline != nil {
+			primaryDown = !*ctrl.primaryOnline
+		}
 		if !ctrl.lastCellularFastRepair.IsZero() && time.Since(ctrl.lastCellularFastRepair) < cellularFastRepairCooldown {
 			ctrl.mu.Unlock()
 			return cellularUSBPathReady(device)
@@ -1030,14 +1388,12 @@ func (a *app) fastRepairCellularUSB(device string) bool {
 		ctrl.mu.Unlock()
 	}
 
-	// 1) 清 ARP 假活 + 触发一次邻居发现
 	if flushARPAndNudge(device) {
 		a.failoverLog("network failover: %s recovered after ARP nudge", device)
 		a.setFailoverMessage("已通过 ARP 刷新恢复 USB 网关")
 		return true
 	}
 
-	// 2) 链路仍在但无可用 IPv4：温和 DHCP renew（勿对已有假活 IP 乱 renew）
 	if interfaceMediaActive(device) && !deviceHasUsableIPv4(device) {
 		renewInterfaceDHCPSilent(device)
 		if waitCellularUSBPath(device, 8*time.Second) {
@@ -1047,14 +1403,19 @@ func (a *app) fastRepairCellularUSB(device string) bool {
 		}
 	}
 
-	// 3) 重建 PDP（比软重启快很多）
+	// 主网已挂：必须做 PDP，否则 en8 会一直 ARP incomplete、切了也上不了网。
 	if a.recycleCellularPDP(device) {
 		a.failoverLog("network failover: %s recovered after PDP recycle", device)
 		a.setFailoverMessage("已通过重建数据承载恢复 USB 上网")
 		return true
 	}
 
-	// 4) 射频开关（CFUN=0/1，不做 CFUN=1,1 整机软重启）
+	if primaryDown {
+		a.failoverLog("network failover: ARP+PDP finished on %s while primary down (ready=%v)",
+			device, cellularUSBPathReady(device))
+		return cellularUSBPathReady(device)
+	}
+
 	if a.cycleCellularRadio(device) {
 		a.failoverLog("network failover: %s recovered after radio cycle", device)
 		a.setFailoverMessage("已通过射频开关恢复 USB 上网")
@@ -1144,6 +1505,20 @@ func (a *app) cellularSoftRebootInCooldown() (bool, time.Duration) {
 
 // 主网卡正常时：只用快修维护蜂窝备选，绝不软重启（避免 AT 口长时间不可用）。
 func (a *app) maybeMaintainCellularBackup(preferred []string, byName map[string]networkService) {
+	ctrl := a.networkFailover
+	if ctrl != nil {
+		ctrl.mu.Lock()
+		if ctrl.usingBackup {
+			ctrl.mu.Unlock()
+			return
+		}
+		if !ctrl.lastCellularMaintain.IsZero() && time.Since(ctrl.lastCellularMaintain) < cellularMaintainInterval {
+			ctrl.mu.Unlock()
+			return
+		}
+		ctrl.lastCellularMaintain = time.Now()
+		ctrl.mu.Unlock()
+	}
 	for _, name := range preferred[1:] {
 		svc, ok := byName[name]
 		if !ok || isOverlayNetworkService(svc) {
@@ -1152,14 +1527,13 @@ func (a *app) maybeMaintainCellularBackup(preferred []string, byName map[string]
 		if !(looksLikeCellularService(svc) || svc.Module) {
 			continue
 		}
-		ready := cellularUSBPathReady(svc.Device)
-		online := ready && probeInterfaceInternet(context.Background(), svc.Device)
-		if online {
+		if cellularUSBPathReady(svc.Device) {
 			continue
 		}
-		a.failoverLog("network failover: maintaining cellular backup %s (gateway=%v internet=%v)",
-			svc.Name, ready, online)
-		a.ensureCellularUnderlayAddressOpts(svc.Device, false)
+		a.failoverLog("network failover: maintaining cellular backup %s (ARP only)", svc.Name)
+		if flushARPAndNudge(svc.Device) {
+			a.setFailoverMessage("备选 4G USB 网关已刷新")
+		}
 		return
 	}
 }
@@ -1305,6 +1679,21 @@ func interfaceIPv4Gateway(device string) net.IP {
 	return nil
 }
 
+func systemHasInternet() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	d := net.Dialer{Timeout: 1500 * time.Millisecond}
+	for _, target := range networkFailoverProbeTargets4 {
+		conn, err := d.DialContext(ctx, "tcp", target)
+		if err != nil {
+			continue
+		}
+		_ = conn.Close()
+		return true
+	}
+	return false
+}
+
 func pingViaInterface(device, gateway string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -1312,10 +1701,13 @@ func pingViaInterface(device, gateway string) bool {
 	return cmd.Run() == nil
 }
 
+// 国内环境直连 1.1.1.1:443 / 8.8.8.8:443 常超时；优先 DNS 端口与国内公共解析。
 var networkFailoverProbeTargets4 = []string{
-	"1.1.1.1:443",
-	"8.8.8.8:443",
+	"223.5.5.5:53",
+	"119.29.29.29:53",
 	"9.9.9.9:53",
+	"1.1.1.1:443",
+	"8.8.8.8:53",
 }
 
 var networkFailoverProbeTargets6 = []string{

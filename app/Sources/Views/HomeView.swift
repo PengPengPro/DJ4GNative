@@ -379,11 +379,11 @@ struct HomeView: View {
                     networkRecoveryRow(traffic)
                 }
                 HStack(spacing: 16) {
-                    trafficItem("本次下载", trafficMetric(traffic.sessionRX))
+                    trafficItem("累计下载", trafficMetric(traffic.sessionRX))
                     Divider().frame(height: 26)
-                    trafficItem("本次上传", trafficMetric(traffic.sessionTX))
+                    trafficItem("累计上传", trafficMetric(traffic.sessionTX))
                     Divider().frame(height: 26)
-                    trafficItem("本次总流量", trafficMetric(traffic.sessionTotal))
+                    trafficItem("累计总流量", trafficMetric(traffic.sessionTotal))
                     Divider().frame(height: 26)
                     trafficItem("网卡累计", trafficMetric(trafficTotal))
                 }
@@ -591,7 +591,7 @@ struct HomeView: View {
         .alert("通知权限被拒绝", isPresented: $showNotifyDeniedAlert) {
             Button("好", role: .cancel) {}
         } message: {
-            Text("请在 系统设置 → 通知 中允许 DJOneHub 的通知后再开启。")
+            Text("请在 系统设置 → 通知 中允许 DJ4GNative 的通知后再开启。")
         }
     }
 

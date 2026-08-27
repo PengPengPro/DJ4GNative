@@ -25,7 +25,7 @@ DJOneHub 是大疆第一代 4G 模块管理工具的原生 macOS 重制版。Swi
 
 | 模块 | 功能 |
 | --- | --- |
-| 首页与网络 | 模块、SIM、信号和设备信息；本次与累计流量；USB 网卡开关、网络服务排序、4G 默认出口检查和模块重启；**自动故障切换始终开启**（Wi‑Fi 不可用时切到 DJ‑4G，恢复后切回；不关闭 Wi‑Fi、不退出 Quantumult X） |
+| 首页与网络 | 模块、SIM、信号和设备信息；累计流量（持久化，重启续计）与网卡内核计数；USB 网卡开关、网络服务排序、4G 默认出口检查和模块重启；**自动故障切换始终开启**（Wi‑Fi 不可用时切到 DJ‑4G，恢复后切回；不关闭 Wi‑Fi、不退出 Quantumult X） |
 | 短信 | 会话收发与回复、单条删除、验证码标记；SIM / 模块存储扫描与选择性清理；短信接管、本机归档和系统通知 |
 | eSIM | 实体 SIM / eUICC 识别、卡片与 Profile 信息；Profile 下载、启用、改名和删除；号码资料与模块通讯录检测 |
 | 通话 | 独立通话页面与首次启用引导；拨号、接听、挂断、Mac 麦克风与扬声器桥接、来电卡片、铃声、通话记录，以及配置备份的导入、导出、删除与安全还原 |
@@ -39,9 +39,9 @@ DJOneHub 是大疆第一代 4G 模块管理工具的原生 macOS 重制版。Swi
 底层出口顺序一般为 **Wi‑Fi → DJ‑4G → 有线 → Thunderbolt Bridge**，**Quantumult X 等 VPN 作为上层代理排在最后**，故障切换不会关闭代理。
 
 - 启动后自动故障切换默认开启，界面不提供关闭开关。请在首页「网卡优先级」中排好顺序并「应用顺序」（首次需管理员授权安装助手）。
-- **Wi‑Fi 当前不可用**（链路断开或探测失败）时提升 DJ‑4G；Wi‑Fi 恢复后切回。不会去关闭 Wi‑Fi 硬件。
+- **按你设置的优先级链切换**：第一优先级连续不可用约 **5 秒**后切到第二；第二仍不可用（快修后仍假活）再试第三。Wi‑Fi 等主网须 **连续约 5 秒探测到公网** 才切回，仅局域网网关通不算恢复。
 - 切到底层备选或从备选切回时，会短暂开关一次 Quantumult 网络服务，促使代理重绑底层，而不是退出 Quantumult。
-- USB 模块常见「假活」：Mac 上 `en8` 已有 `192.168.225.x`，但网关 ARP 为 `incomplete`，或网关通却无法出公网。恢复顺序优先 **ARP 刷新 → DHCP 续约 → 重建 PDP（`AT+CGACT`）→ 射频开关（`AT+CFUN=0/1`）**；**整机软重启 `AT+CFUN=1,1` 仅作最后手段且后台进行**，避免卡住界面与诊断接口。主网卡正常时只做快修维护备选，不软重启。
+- USB 模块常见「假活」：Mac 上 `en8` 已有 `192.168.225.x`，但网关 ARP 为 `incomplete`，或网关通却无法出公网。切到 4G 后会立刻做 **ARP 刷新 → DHCP 续约 → 重建 PDP（`AT+CGACT`）**；主网挂起时不再跳过 PDP。射频开关 / 整机软重启仍作更重手段且有冷却。
 - 切勿对 AppleUserECM（模块 USB 网卡）做 `ifconfig down/up`，会弄死链路。
 
 诊断报告可在首页或「调试与诊断 → 网络诊断」中 **清空日志** / **复制诊断日志**。日志文件为 `~/Library/Application Support/DJOneHubNative/djonehub-diagnostic.log`。
@@ -88,9 +88,9 @@ DJOneHub 是大疆第一代 4G 模块管理工具的原生 macOS 重制版。Swi
 
 ```sh
 mise install                # 安装 mise.toml 固定的 Go 版本
-mise run build              # 构建当前架构的 .app
-mise run build:universal    # 构建 arm64 + x86_64 通用包
-mise run launch             # 启动已构建的 app
+mise run build              # 构建当前架构的 .app，并安装到 /Applications/DJ4GNative.app
+mise run build:universal    # 构建通用包，并安装到 /Applications
+mise run launch             # 启动 /Applications/DJ4GNative.app
 mise run backend:test       # 运行后端测试
 mise run clean              # 清理 build/ 与 dist/
 ```

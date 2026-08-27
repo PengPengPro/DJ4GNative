@@ -304,11 +304,11 @@ struct AIIntegrationView: View {
         case .checking:
             return "正在检查 CLI 状态。"
         case .bundledUnavailable:
-            return "当前 App 中未找到 CLI，请重新安装 DJOneHub。"
+            return "当前 App 中未找到 CLI，请重新安装 DJ4GNative。"
         case .notInstalled:
             return "安装后，可在终端和支持命令行工具的 Agent 中使用 djonehub。"
         case .installed:
-            return "CLI 已可用。DJOneHub 更新后，如需同步新版本，会在这里提醒你。"
+            return "CLI 已可用。DJ4GNative 更新后，如需同步新版本，会在这里提醒你。"
         case .updateAvailable:
             return "已安装版本与当前 App 不一致，请同步后继续使用。"
         case .conflict(let reason):

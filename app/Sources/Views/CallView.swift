@@ -1426,7 +1426,7 @@ struct CallView: View {
     private var deleteConfirmationMessage: String {
         guard let backup = backupToDelete else { return "" }
         let time = backup.savedAt.formatted(date: .numeric, time: .shortened)
-        return "将从本机永久删除 \(time) 的配置备份。此操作不会修改当前模块，但删除后无法在 DJOneHub 中导出或还原这份备份。"
+        return "将从本机永久删除 \(time) 的配置备份。此操作不会修改当前模块，但删除后无法在 DJ4GNative 中导出或还原这份备份。"
     }
 
     private var usbConfirmationTitle: String {
@@ -1460,7 +1460,7 @@ struct CallView: View {
     private func chooseImportFile() {
         let panel = NSOpenPanel()
         panel.title = "导入模块配置备份"
-        panel.message = "选择由 DJOneHub 导出的 JSON 备份。导入只保存到本机，不会立即修改模块。"
+        panel.message = "选择由 DJ4GNative 导出的 JSON 备份。导入只保存到本机，不会立即修改模块。"
         panel.prompt = "导入"
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false

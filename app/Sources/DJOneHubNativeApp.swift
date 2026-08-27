@@ -105,7 +105,7 @@ private struct ModernDJOneHubNativeApp: App {
     private let launchSilently = AppLaunchMode.shouldLaunchSilently
 
     var body: some Scene {
-        Window("DJOneHub", id: AppSceneID.mainWindow) {
+        Window("DJ4GNative", id: AppSceneID.mainWindow) {
             MainAppContent(appDelegate: appDelegate, dependencies: dependencies)
         }
         .windowStyle(.titleBar)
@@ -121,7 +121,7 @@ private struct LegacyDJOneHubNativeApp: App {
     @StateObject private var dependencies = AppDependencies()
 
     var body: some Scene {
-        Window("DJOneHub", id: AppSceneID.mainWindow) {
+        Window("DJ4GNative", id: AppSceneID.mainWindow) {
             MainAppContent(appDelegate: appDelegate, dependencies: dependencies)
         }
         .windowStyle(.titleBar)
@@ -270,57 +270,38 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
 
         store.$status
             .receive(on: RunLoop.main)
-            .sink { [weak self, weak store] status in
-                guard let self else { return }
-                self.renderMenuBar(
-                    status: status,
-                    traffic: store?.traffic,
-                    isStale: store?.statusStale ?? false,
-                    pathKind: store?.networkPathKind,
-                    pathLabel: store?.networkPathLabel)
+            .sink { [weak self, weak store] _ in
+                guard let self, let store else { return }
+                self.renderMenuBar(from: store)
             }
             .store(in: &statusCancellables)
 
         store.$traffic
             .receive(on: RunLoop.main)
             .sink { [weak self, weak store] traffic in
-                guard let self else { return }
+                guard let self, let store else { return }
                 self.consumeTrafficSample(traffic)
-                self.renderMenuBar(
-                    status: store?.status,
-                    traffic: traffic,
-                    isStale: store?.statusStale ?? false,
-                    pathKind: store?.networkPathKind,
-                    pathLabel: store?.networkPathLabel)
+                self.renderMenuBar(from: store)
             }
             .store(in: &statusCancellables)
 
         store.$statusStale
             .receive(on: RunLoop.main)
             .sink { [weak self, weak store] isStale in
-                guard let self else { return }
+                guard let self, let store else { return }
                 if isStale {
                     self.resetTrafficRate()
                 }
-                self.renderMenuBar(
-                    status: store?.status,
-                    traffic: store?.traffic,
-                    isStale: isStale,
-                    pathKind: store?.networkPathKind,
-                    pathLabel: store?.networkPathLabel)
+                self.renderMenuBar(from: store)
             }
             .store(in: &statusCancellables)
 
         store.$networkPathKind
+            .combineLatest(store.$networkPathLabel, store.$networkPathService, store.$networkUsingBackup)
             .receive(on: RunLoop.main)
-            .sink { [weak self, weak store] _ in
-                guard let self else { return }
-                self.renderMenuBar(
-                    status: store?.status,
-                    traffic: store?.traffic,
-                    isStale: store?.statusStale ?? false,
-                    pathKind: store?.networkPathKind,
-                    pathLabel: store?.networkPathLabel)
+            .sink { [weak self, weak store] _, _, _, _ in
+                guard let self, let store else { return }
+                self.renderMenuBar(from: store)
             }
             .store(in: &statusCancellables)
 
@@ -337,32 +318,24 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
             for: MenuBarDisplayOptions.didChangeNotification)
             .receive(on: RunLoop.main)
             .sink { [weak self, weak store] _ in
-                guard let self else { return }
-                self.renderMenuBar(
-                    status: store?.status,
-                    traffic: store?.traffic,
-                    isStale: store?.statusStale ?? false,
-                    pathKind: store?.networkPathKind,
-                    pathLabel: store?.networkPathLabel)
+                guard let self, let store else { return }
+                self.renderMenuBar(from: store)
             }
             .store(in: &statusCancellables)
     }
 
     private func consumeTrafficSample(_ snapshot: TrafficSnapshot?) {
-        guard let snapshot,
-              snapshot.available,
-              let rxBytes = snapshot.rxBytes,
-              let txBytes = snapshot.txBytes else {
+        guard let sample = snapshot?.liveRateSample else {
             resetTrafficRate()
             return
         }
 
-        let sampledAt = snapshot.sampledAtMS.map { TimeInterval($0) / 1_000 }
+        let sampledAt = snapshot?.sampledAtMS.map { TimeInterval($0) / 1_000 }
             ?? Date().timeIntervalSince1970
         let current = TrafficCounterSample(
-            interfaceName: snapshot.interface,
-            rxBytes: rxBytes,
-            txBytes: txBytes,
+            interfaceName: sample.interfaceName,
+            rxBytes: sample.rxBytes,
+            txBytes: sample.txBytes,
             sampledAt: sampledAt)
 
         guard let previous = previousTrafficSample else {
@@ -397,15 +370,33 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
         uploadBytesPerSecond = nil
     }
 
+    private func renderMenuBar(from store: DashboardStore) {
+        renderMenuBar(
+            status: store.status,
+            traffic: store.traffic,
+            isStale: store.statusStale,
+            pathKind: store.networkPathKind,
+            pathLabel: store.networkPathLabel,
+            pathService: store.networkPathService,
+            usingBackup: store.networkUsingBackup)
+    }
+
     private func renderMenuBar(
         status: DeviceStatus?,
         traffic: TrafficSnapshot?,
         isStale: Bool,
         pathKind: String? = nil,
-        pathLabel: String? = nil
+        pathLabel: String? = nil,
+        pathService: String? = nil,
+        usingBackup: Bool = false
     ) {
         let displayOptions = MenuBarDisplayOptions()
         let pathTitle = NetworkPathIcons.shortTitle(kind: pathKind, label: pathLabel)
+        let usingCellular = Self.isCellularUnderlay(
+            pathKind: pathKind,
+            pathLabel: pathLabel,
+            pathService: pathService,
+            usingBackup: usingBackup)
 
         if isStale {
             let rateTitles = displayOptions.rateTitles(download: "—", upload: "—")
@@ -415,30 +406,54 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
                     pathKind: pathKind,
                     signalDBM: nil,
                     unavailableDescription: "网络状态暂时不可用",
-                    rateTitles: rateTitles),
+                    rateTitles: rateTitles,
+                    usesCellularUnderlay: usingCellular),
                 rateTitles: rateTitles,
                 downloadRate: "—",
                 uploadRate: "—",
                 networkSummary: "网络状态暂时不可用",
-                trafficSummary: "等待下一次刷新…")
+                trafficSummary: "等待下一次刷新…",
+                usesCellularUnderlay: usingCellular)
             return
         }
 
         if let hardwareStatus = status?.hardwareStatus, !hardwareStatus.isEmpty {
-            resetTrafficRate()
-            let rateTitles = displayOptions.rateTitles(download: "—", upload: "—")
+            let rateTitles: MenuBarRateTitles
+            let downloadRate: String
+            let uploadRate: String
+            let trafficSummary: String
+            if traffic?.liveRateSample != nil {
+                let download = formatRate(downloadBytesPerSecond)
+                let upload = formatRate(uploadBytesPerSecond)
+                downloadRate = download
+                uploadRate = upload
+                rateTitles = displayOptions.rateTitles(
+                    download: formatRateCompact(downloadBytesPerSecond),
+                    upload: formatRateCompact(uploadBytesPerSecond))
+                trafficSummary = (downloadBytesPerSecond == nil || uploadBytesPerSecond == nil)
+                    ? "正在计算实时流量…"
+                    : "下载 \(download)  ·  上传 \(upload)"
+            } else {
+                resetTrafficRate()
+                rateTitles = displayOptions.rateTitles(download: "—", upload: "—")
+                downloadRate = "—"
+                uploadRate = "—"
+                trafficSummary = "实时流量不可用"
+            }
             menuBarPresentation = MenuBarPresentation(
                 image: menuBarCompositeImage(
                     options: displayOptions,
                     pathKind: pathKind,
                     signalDBM: nil,
                     unavailableDescription: "未检测到模块",
-                    rateTitles: rateTitles),
+                    rateTitles: rateTitles,
+                    usesCellularUnderlay: usingCellular),
                 rateTitles: rateTitles,
-                downloadRate: "—",
-                uploadRate: "—",
+                downloadRate: downloadRate,
+                uploadRate: uploadRate,
                 networkSummary: "未检测到模块 · \(pathTitle)",
-                trafficSummary: "实时流量不可用")
+                trafficSummary: trafficSummary,
+                usesCellularUnderlay: usingCellular)
             return
         }
 
@@ -469,7 +484,7 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
         let downloadRate: String
         let uploadRate: String
         let trafficSummary: String
-        if traffic?.available == true {
+        if traffic?.liveRateSample != nil {
             let download = formatRate(downloadBytesPerSecond)
             let upload = formatRate(uploadBytesPerSecond)
             downloadRate = download
@@ -495,7 +510,8 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
             pathKind: pathKind,
             signalDBM: status?.signalDbm,
             unavailableDescription: status == nil ? "正在读取网络信号" : "蜂窝信号暂时不可用",
-            rateTitles: rateTitles)
+            rateTitles: rateTitles,
+            usesCellularUnderlay: usingCellular)
 
         menuBarPresentation = MenuBarPresentation(
             image: image,
@@ -503,7 +519,28 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
             downloadRate: downloadRate,
             uploadRate: uploadRate,
             networkSummary: networkSummary,
-            trafficSummary: trafficSummary)
+            trafficSummary: trafficSummary,
+            usesCellularUnderlay: usingCellular)
+    }
+
+    static func isCellularUnderlay(
+        pathKind: String?,
+        pathLabel: String?,
+        pathService: String?,
+        usingBackup: Bool
+    ) -> Bool {
+        if usingBackup {
+            return true
+        }
+        if pathKind == "cellular" {
+            return true
+        }
+        let haystack = [pathLabel, pathService]
+            .compactMap { $0?.lowercased() }
+            .joined(separator: " ")
+        return haystack.contains("dj-4g")
+            || haystack.contains("经 4g")
+            || (haystack.contains("4g") && haystack.contains("经"))
     }
 
     private func menuBarCompositeImage(
@@ -511,48 +548,65 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
         pathKind: String?,
         signalDBM: Int?,
         unavailableDescription: String,
-        rateTitles: MenuBarRateTitles
+        rateTitles: MenuBarRateTitles,
+        usesCellularUnderlay: Bool
     ) -> NSImage? {
         guard let icon = menuBarImage(
             options: options,
             pathKind: pathKind,
             signalDBM: signalDBM,
             unavailableDescription: unavailableDescription) else {
-            return makeMenuBarRateStackImage(rateTitles)
+            return makeMenuBarRateStackImage(rateTitles, usesCellularUnderlay: usesCellularUnderlay)
         }
-        guard let rates = makeMenuBarRateStackImage(rateTitles) else {
-            return icon
+        guard let rates = makeMenuBarRateStackImage(rateTitles, usesCellularUnderlay: usesCellularUnderlay) else {
+            return tintMenuBarImage(icon, usesCellularUnderlay: usesCellularUnderlay)
         }
 
-        icon.isTemplate = true
-        rates.isTemplate = true
-
+        let tintedIcon = tintMenuBarImage(icon, usesCellularUnderlay: usesCellularUnderlay) ?? icon
         let spacing: CGFloat = 3.5
-        let totalWidth = icon.size.width + spacing + rates.size.width
-        let totalHeight = max(icon.size.height, rates.size.height)
+        let totalWidth = tintedIcon.size.width + spacing + rates.size.width
+        let totalHeight = max(tintedIcon.size.height, rates.size.height)
         let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
-            let iconY = floor((totalHeight - icon.size.height) / 2)
+            let iconY = floor((totalHeight - tintedIcon.size.height) / 2)
             let ratesY = floor((totalHeight - rates.size.height) / 2)
-            icon.draw(
+            tintedIcon.draw(
                 at: NSPoint(x: 0, y: iconY),
-                from: NSRect(origin: .zero, size: icon.size),
+                from: NSRect(origin: .zero, size: tintedIcon.size),
                 operation: .sourceOver,
                 fraction: 1)
             rates.draw(
-                at: NSPoint(x: icon.size.width + spacing, y: ratesY),
+                at: NSPoint(x: tintedIcon.size.width + spacing, y: ratesY),
                 from: NSRect(origin: .zero, size: rates.size),
                 operation: .sourceOver,
                 fraction: 1)
             return true
         }
-        image.isTemplate = true
+        // 4G 用绿色实色；其它走菜单栏模板色（浅色菜单栏为黑，深色为白）
+        image.isTemplate = !usesCellularUnderlay
         image.accessibilityDescription = [
-            icon.accessibilityDescription,
+            tintedIcon.accessibilityDescription,
             rates.accessibilityDescription,
         ]
             .compactMap { $0 }
             .joined(separator: "，")
         return image
+    }
+
+    private func tintMenuBarImage(_ image: NSImage, usesCellularUnderlay: Bool) -> NSImage? {
+        guard usesCellularUnderlay else {
+            image.isTemplate = true
+            return image
+        }
+        let size = image.size
+        let tinted = NSImage(size: size, flipped: false) { rect in
+            image.draw(in: rect)
+            NSColor.systemGreen.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.isTemplate = false
+        tinted.accessibilityDescription = image.accessibilityDescription
+        return tinted
     }
 
     private func menuBarImage(
@@ -581,7 +635,7 @@ final class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate,
         }
         return NSImage(
             systemSymbolName: "antenna.radiowaves.left.and.right",
-            accessibilityDescription: "DJOneHub")
+            accessibilityDescription: "DJ4GNative")
     }
 
     private func signalImage(for dbm: Int) -> NSImage {
@@ -757,6 +811,8 @@ struct MenuBarPresentation {
     let uploadRate: String
     let networkSummary: String
     let trafficSummary: String
+    /// 底层正在用 4G 模块上网时，菜单栏用绿色提示。
+    let usesCellularUnderlay: Bool
 
     var accessibilitySummary: String {
         "\(networkSummary)，\(trafficSummary)"
@@ -774,7 +830,8 @@ struct MenuBarPresentation {
             downloadRate: "—",
             uploadRate: "—",
             networkSummary: "正在读取网络状态…",
-            trafficSummary: "实时流量等待采样…")
+            trafficSummary: "实时流量等待采样…",
+            usesCellularUnderlay: false)
     }
 }
 
@@ -810,9 +867,9 @@ private struct MenuBarStatusLabel: View {
         HStack(alignment: .center, spacing: 3.5) {
             if let image = presentation.image {
                 Image(nsImage: image)
-                    .renderingMode(.template)
+                    .renderingMode(presentation.usesCellularUnderlay ? .original : .template)
                     .frame(width: image.size.width, height: image.size.height)
-                    .id(presentation.rateTitles.stacked ?? image.accessibilityDescription ?? "")
+                    .id((presentation.rateTitles.stacked ?? "") + (presentation.usesCellularUnderlay ? "-4g" : "-wifi"))
             }
             if cliIntegration.cliUpdateAvailable {
                 Image(systemName: "arrow.down.circle.fill")
@@ -856,14 +913,18 @@ private struct MenuBarStatusLabel: View {
 
 /// 菜单栏上下两行网速：上↑上行，下↓下行。与信号格相同，用 drawingHandler 绘制。
 @MainActor
-private func makeMenuBarRateStackImage(_ titles: MenuBarRateTitles) -> NSImage? {
+private func makeMenuBarRateStackImage(
+    _ titles: MenuBarRateTitles,
+    usesCellularUnderlay: Bool = false
+) -> NSImage? {
     let lines = [titles.upload, titles.download].compactMap { $0 }
     guard !lines.isEmpty else { return nil }
 
     let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+    let color: NSColor = usesCellularUnderlay ? .systemGreen : .black
     let attributes: [NSAttributedString.Key: Any] = [
         .font: font,
-        .foregroundColor: NSColor.black,
+        .foregroundColor: color,
     ]
     let sizes = lines.map { ($0 as NSString).size(withAttributes: attributes) }
     let lineHeight: CGFloat = 11
@@ -877,7 +938,7 @@ private func makeMenuBarRateStackImage(_ titles: MenuBarRateTitles) -> NSImage? 
         }
         return true
     }
-    image.isTemplate = true
+    image.isTemplate = !usesCellularUnderlay
     image.accessibilityDescription = lines.joined(separator: "，")
     return image
 }
@@ -1374,7 +1435,7 @@ private struct MenuBarDashboardPanel: View {
         {
             return operatorName
         }
-        return "DJOneHub"
+        return "DJ4GNative"
     }
 
     private var networkDetail: String {
@@ -1530,7 +1591,7 @@ private struct MenuBarDashboardPanel: View {
     private var sessionSummaryText: String {
         let download = trafficMetric(store.traffic?.sessionRX)
         let upload = trafficMetric(store.traffic?.sessionTX)
-        return "本次  下载 \(download) · 上传 \(upload)"
+        return "累计  下载 \(download) · 上传 \(upload)"
     }
 
     private var callStatusText: String {
@@ -1623,7 +1684,7 @@ private struct MenuBarDashboardPanel: View {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "通知权限未开启"
-        alert.informativeText = "请在系统设置中允许 DJOneHub 发送通知。"
+        alert.informativeText = "请在系统设置中允许 DJ4GNative 发送通知。"
         alert.addButton(withTitle: "打开通知设置")
         alert.addButton(withTitle: "取消")
         if alert.runModal() == .alertFirstButtonReturn {
@@ -1673,19 +1734,16 @@ private final class MenuBarTrafficHistory: ObservableObject {
     private let capacity = 48
 
     func consume(_ snapshot: TrafficSnapshot?) {
-        guard let snapshot,
-              snapshot.available,
-              let rxBytes = snapshot.rxBytes,
-              let txBytes = snapshot.txBytes else {
+        guard let sample = snapshot?.liveRateSample else {
             reset()
             return
         }
 
         let current = CounterSample(
-            interfaceName: snapshot.interface,
-            rxBytes: rxBytes,
-            txBytes: txBytes,
-            sampledAt: snapshot.sampledAtMS.map { TimeInterval($0) / 1_000 }
+            interfaceName: sample.interfaceName,
+            rxBytes: sample.rxBytes,
+            txBytes: sample.txBytes,
+            sampledAt: snapshot?.sampledAtMS.map { TimeInterval($0) / 1_000 }
                 ?? Date().timeIntervalSince1970)
 
         guard let previous else {
@@ -1706,11 +1764,11 @@ private final class MenuBarTrafficHistory: ObservableObject {
             return
         }
 
-        let sample = MenuBarTrafficChartSample(
+        let samplePoint = MenuBarTrafficChartSample(
             download: Double(current.rxBytes - previous.rxBytes) / elapsed,
             upload: Double(current.txBytes - previous.txBytes) / elapsed)
         self.previous = current
-        samples.append(sample)
+        samples.append(samplePoint)
         if samples.count > capacity {
             samples.removeFirst(samples.count - capacity)
         }

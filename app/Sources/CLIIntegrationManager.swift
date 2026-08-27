@@ -124,7 +124,7 @@ final class CLIIntegrationManager: ObservableObject {
 
     var copyablePrompt: String {
         """
-        DJOneHub 已安装在这台 Mac 上。请运行：
+        DJ4GNative 已安装在这台 Mac 上。请运行：
         djonehub agent skill export --format json
 
         读取返回结果中的 entrypoint_content、source_directory 和 files，并按照当前 Agent 支持的方式安装 Skill。如果当前 Agent 不支持安装 Skill，请直接读取并遵循 entrypoint_content。
@@ -224,7 +224,7 @@ final class CLIIntegrationManager: ObservableObject {
             do {
                 let sourceHash = try Self.sha256(of: sourceURL)
                 let marker = CLIInstallationMarker(
-                    product: "DJOneHub",
+                    product: "DJ4GNative",
                     bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.djonehub.native",
                     version: currentVersion,
                     installedSHA256: sourceHash,
@@ -354,7 +354,7 @@ final class CLIIntegrationManager: ObservableObject {
     private func prepareSupportDirectory() throws {
         try fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
         guard Darwin.chmod(supportDirectory.path, 0o700) == 0 else {
-            throw CLIIntegrationError("无法保护 DJOneHub 的本机配置目录。")
+            throw CLIIntegrationError("无法保护 DJ4GNative 的本机配置目录。")
         }
     }
 
@@ -378,27 +378,27 @@ final class CLIIntegrationManager: ObservableObject {
         }
         guard fileType == S_IFREG else {
             return .init(
-                state: .conflict("/usr/local/bin/djonehub 不是由 DJOneHub 管理的普通文件。"),
+                state: .conflict("/usr/local/bin/djonehub 不是由 DJ4GNative 管理的普通文件。"),
                 installedVersion: nil)
         }
         do {
             var markerStatus = stat()
             guard Darwin.lstat(Self.markerURL.path, &markerStatus) == 0 else {
                 return .init(
-                    state: .conflict("已存在同名 CLI，但缺少 DJOneHub 管理标记；不会覆盖。"),
+                    state: .conflict("已存在同名 CLI，但缺少 DJ4GNative 管理标记；不会覆盖。"),
                     installedVersion: nil)
             }
             guard (markerStatus.st_mode & S_IFMT) == S_IFREG else {
                 return .init(
-                    state: .conflict("DJOneHub CLI 管理标记不是普通文件；不会覆盖。"),
+                    state: .conflict("DJ4GNative CLI 管理标记不是普通文件；不会覆盖。"),
                     installedVersion: nil)
             }
             let markerData = try Data(contentsOf: Self.markerURL)
             let marker = try JSONDecoder().decode(CLIInstallationMarker.self, from: markerData)
-            guard marker.product == "DJOneHub",
+            guard Self.isKnownProduct(marker.product),
                   Self.isDJOneHubBundleIdentifier(marker.bundleIdentifier) else {
                 return .init(
-                    state: .conflict("现有 CLI 的管理标记不属于 DJOneHub。"),
+                    state: .conflict("现有 CLI 的管理标记不属于 DJ4GNative。"),
                     installedVersion: nil)
             }
             let installedHash = try Self.sha256(of: Self.destinationURL)
@@ -417,6 +417,10 @@ final class CLIIntegrationManager: ObservableObject {
                 state: .conflict("无法验证现有 CLI：\(error.localizedDescription)"),
                 installedVersion: nil)
         }
+    }
+
+    private static func isKnownProduct(_ product: String) -> Bool {
+        product == "DJ4GNative" || product == "DJOneHub"
     }
 
     private static func isDJOneHubBundleIdentifier(_ identifier: String) -> Bool {

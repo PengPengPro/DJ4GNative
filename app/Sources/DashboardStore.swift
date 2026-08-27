@@ -75,6 +75,7 @@ final class DashboardStore: ObservableObject {
     @Published var networkPathKind: String?
     @Published var networkPathLabel: String?
     @Published var networkPathService: String?
+    @Published var networkUsingBackup = false
 
 
     @Published var toast: ToastItem?
@@ -932,7 +933,7 @@ final class DashboardStore: ObservableObject {
             defer { self.audioActivationTask = nil }
             do {
                 guard await AudioBridge.shared.requestMicrophoneAccess() else {
-                    self.audioError = "麦克风权限未开启。请在系统设置“隐私与安全性 → 麦克风”中允许 DJOneHub。"
+                    self.audioError = "麦克风权限未开启。请在系统设置“隐私与安全性 → 麦克风”中允许 DJ4GNative。"
                     return
                 }
                 let result: CallAudioStartResult = try await APIClient(timeoutInterval: 60)
@@ -1035,6 +1036,7 @@ final class DashboardStore: ObservableObject {
                 networkPathKind = status.pathKind
                 networkPathLabel = status.pathLabel
                 networkPathService = status.activeService
+                networkUsingBackup = status.usingBackup == true
                 if !status.enabled {
                     ensureNetworkFailoverEnabled()
                 }
@@ -1058,6 +1060,7 @@ final class DashboardStore: ObservableObject {
                 networkPathKind = status.pathKind
                 networkPathLabel = status.pathLabel
                 networkPathService = status.activeService
+                networkUsingBackup = status.usingBackup == true
             } catch {
                 // 轮询时会重试
             }

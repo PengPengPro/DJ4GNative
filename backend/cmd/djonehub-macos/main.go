@@ -140,8 +140,8 @@ type app struct {
 
 	moduleNotesMu sync.Mutex
 
-	trafficMu        sync.Mutex
-	trafficBaselines map[string]networkByteCounters
+	trafficMu    sync.Mutex
+	trafficStats networkTrafficPersistedState
 
 	// 分应用网络出口：配置默认关闭，运行时由独立页面显式启停。
 	routing *routingManager
@@ -214,15 +214,18 @@ type networkByteCounters struct {
 }
 
 type networkTrafficSnapshot struct {
-	Available    bool   `json:"available"`
-	Interface    string `json:"interface,omitempty"`
-	RXBytes      uint64 `json:"rx_bytes"`
-	TXBytes      uint64 `json:"tx_bytes"`
-	SessionRX    uint64 `json:"session_rx_bytes"`
-	SessionTX    uint64 `json:"session_tx_bytes"`
-	SessionTotal uint64 `json:"session_total_bytes"`
-	SampledAtMS  int64  `json:"sampled_at_ms"`
-	Error        string `json:"error,omitempty"`
+	Available     bool   `json:"available"`
+	Interface     string `json:"interface,omitempty"`
+	RXBytes       uint64 `json:"rx_bytes"`
+	TXBytes       uint64 `json:"tx_bytes"`
+	SessionRX     uint64 `json:"session_rx_bytes"`
+	SessionTX     uint64 `json:"session_tx_bytes"`
+	SessionTotal  uint64 `json:"session_total_bytes"`
+	LiveInterface string `json:"live_interface,omitempty"`
+	LiveRXBytes   uint64 `json:"live_rx_bytes"`
+	LiveTXBytes   uint64 `json:"live_tx_bytes"`
+	SampledAtMS   int64  `json:"sampled_at_ms"`
+	Error         string `json:"error,omitempty"`
 }
 
 type networkCheckResult struct {
@@ -1523,6 +1526,7 @@ func (a *app) initSMSArchive() {
 	a.diagLog = newDiagnosticLogger(dir)
 	a.diagLog.Log("backend: data dir ready at %s", dir)
 	a.initNetworkFailover()
+	a.initTrafficStats()
 	a.ensureSIMPINStore()
 	// 恢复接管模式状态
 	if data, err := os.ReadFile(filepath.Join(dir, "sms-adopt.json")); err == nil {
@@ -2128,21 +2132,37 @@ func (a *app) networkTraffic(w http.ResponseWriter, _ *http.Request) {
 		SampledAtMS: time.Now().UnixMilli(),
 	}
 
-	moduleProduct := ""
-	if usbDevice := a.currentUSBDevice(); usbDevice != nil {
-		moduleProduct = strings.TrimSpace(usbDevice.Product)
-	}
-	if moduleProduct == "" {
-		snapshot.Error = "未识别到 4G 模块"
-		writeJSON(w, http.StatusOK, snapshot)
-		return
-	}
-	services, err := macNetworkServiceOrder(moduleProduct)
+	counters, err := discoverMacInterfaceCounters()
 	if err != nil {
 		snapshot.Error = err.Error()
 		writeJSON(w, http.StatusOK, snapshot)
 		return
 	}
+
+	moduleProduct := ""
+	if usbDevice := a.currentUSBDevice(); usbDevice != nil {
+		moduleProduct = strings.TrimSpace(usbDevice.Product)
+	}
+	services, svcErr := macNetworkServiceOrder(moduleProduct)
+	if svcErr == nil {
+		a.fillLiveTrafficCounters(&snapshot, services, counters)
+	} else {
+		a.fillLiveTrafficCounters(&snapshot, nil, counters)
+	}
+
+	if moduleProduct == "" {
+		if snapshot.Error == "" {
+			snapshot.Error = "未识别到 4G 模块"
+		}
+		writeJSON(w, http.StatusOK, snapshot)
+		return
+	}
+	if svcErr != nil {
+		snapshot.Error = svcErr.Error()
+		writeJSON(w, http.StatusOK, snapshot)
+		return
+	}
+
 	interfaces := discoverMacNetworkInterfaces()
 	name, active := selectModuleTrafficInterface(interfaces, services)
 	if name == "" {
@@ -2156,12 +2176,6 @@ func (a *app) networkTraffic(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, snapshot)
 		return
 	}
-	counters, err := discoverMacInterfaceCounters()
-	if err != nil {
-		snapshot.Error = err.Error()
-		writeJSON(w, http.StatusOK, snapshot)
-		return
-	}
 	current, ok := counters[name]
 	if !ok {
 		snapshot.Error = "未读取到网卡计数"
@@ -2169,29 +2183,87 @@ func (a *app) networkTraffic(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	a.trafficMu.Lock()
-	if a.trafficBaselines == nil {
-		a.trafficBaselines = make(map[string]networkByteCounters)
-	}
-	baseline, exists := a.trafficBaselines[name]
-	if !exists || current.RX < baseline.RX || current.TX < baseline.TX {
-		baseline = current
-		a.trafficBaselines[name] = baseline
-	}
-	a.trafficMu.Unlock()
-
 	snapshot.Available = true
+	snapshot.Error = ""
 	snapshot.Interface = name
 	snapshot.RXBytes = current.RX
 	snapshot.TXBytes = current.TX
-	snapshot.SessionRX, snapshot.SessionTX, snapshot.SessionTotal = sessionTrafficFromCounters(current, baseline)
+	snapshot.SessionRX, snapshot.SessionTX, snapshot.SessionTotal = a.accumulateModuleTraffic(name, current)
 	writeJSON(w, http.StatusOK, snapshot)
 }
 
-func sessionTrafficFromCounters(current, baseline networkByteCounters) (rx, tx, total uint64) {
-	rx = current.RX - baseline.RX
-	tx = current.TX - baseline.TX
-	return rx, tx, rx + tx
+func (a *app) fillLiveTrafficCounters(
+	snapshot *networkTrafficSnapshot,
+	services []networkService,
+	counters map[string]networkByteCounters,
+) {
+	name := resolveLiveTrafficInterface(a.failoverActiveDevice(), services, counters)
+	if name == "" {
+		return
+	}
+	current, ok := counters[name]
+	if !ok {
+		return
+	}
+	snapshot.LiveInterface = name
+	snapshot.LiveRXBytes = current.RX
+	snapshot.LiveTXBytes = current.TX
+}
+
+func (a *app) failoverActiveDevice() string {
+	ctrl := a.networkFailover
+	if ctrl == nil {
+		return ""
+	}
+	ctrl.mu.Lock()
+	defer ctrl.mu.Unlock()
+	return strings.TrimSpace(ctrl.activeDevice)
+}
+
+// resolveLiveTrafficInterface 选择当前真实上网通道网卡，供菜单栏实时速率采样。
+// 优先故障切换底层设备，其次默认路由（非 VPN），再回落底层服务 / VPN 隧道 / 模块网卡。
+func resolveLiveTrafficInterface(
+	activeDevice string,
+	services []networkService,
+	counters map[string]networkByteCounters,
+) string {
+	pick := func(name string) string {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return ""
+		}
+		if _, ok := counters[name]; ok {
+			return name
+		}
+		return ""
+	}
+
+	if name := pick(activeDevice); name != "" {
+		return name
+	}
+
+	route := discoverMacDefaultRoute()
+	if !defaultRouteIsVPN(route.Interface) {
+		if name := pick(route.Interface); name != "" {
+			return name
+		}
+	}
+	if underlay := firstUnderlayService(services); underlay.Device != "" {
+		if name := pick(underlay.Device); name != "" {
+			return name
+		}
+	}
+	if defaultRouteIsVPN(route.Interface) {
+		if name := pick(route.Interface); name != "" {
+			return name
+		}
+	}
+	if name, _ := selectModuleTrafficInterface(nil, services); name != "" {
+		if picked := pick(name); picked != "" {
+			return picked
+		}
+	}
+	return ""
 }
 
 func (a *app) check4GRoute(w http.ResponseWriter, _ *http.Request) {

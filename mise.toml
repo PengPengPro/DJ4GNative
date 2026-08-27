@@ -1,8 +1,10 @@
 [tools]
 go = "1.26.3"
 
+# 安装目录：/Applications（/System/Applications 受 SIP 保护不可写）
+
 [tasks.build]
-description = "用 Xcode 构建 .app 并输出到 dist/（本机架构）"
+description = "构建本机架构 .app，输出到 dist/ 并安装到 /Applications"
 dir = "."
 run = [
   "xcodebuild -project DJOneHubNative.xcodeproj -scheme DJOneHubNative -configuration Release -destination 'platform=macOS' -derivedDataPath build/DerivedData ARCHS=$(uname -m) MARKETING_VERSION=0.1.0-alpha PRODUCT_BUNDLE_IDENTIFIER=com.djonehub.native.alpha DISPLAY_NAME=\"DJ4GNative\" build",
@@ -10,10 +12,12 @@ run = [
   "rm -rf dist/DJ4GNative-$(uname -m).app",
   "cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative-$(uname -m).app",
   "rm -rf build/DerivedData/Build/Products/Release/DJ4GNative.app",
+  "rm -rf /Applications/DJ4GNative.app",
+  "cp -R dist/DJ4GNative-$(uname -m).app /Applications/DJ4GNative.app",
 ]
 
 [tasks."build:arm64"]
-description = "构建 arm64 包到 dist/"
+description = "构建 arm64 包到 dist/ 并安装到 /Applications"
 dir = "."
 run = [
   "xcodebuild -project DJOneHubNative.xcodeproj -scheme DJOneHubNative -configuration Release -destination 'platform=macOS' -derivedDataPath build/DerivedData ARCHS=arm64 MARKETING_VERSION=0.1.0-alpha PRODUCT_BUNDLE_IDENTIFIER=com.djonehub.native.alpha DISPLAY_NAME=\"DJ4GNative\" build",
@@ -21,10 +25,12 @@ run = [
   "rm -rf dist/DJ4GNative-arm64.app",
   "cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative-arm64.app",
   "rm -rf build/DerivedData/Build/Products/Release/DJ4GNative.app",
+  "rm -rf /Applications/DJ4GNative.app",
+  "cp -R dist/DJ4GNative-arm64.app /Applications/DJ4GNative.app",
 ]
 
 [tasks."build:x86_64"]
-description = "构建 x86_64 包到 dist/（需设置 LIBUSB_DYLIB_X86_64）"
+description = "构建 x86_64 包到 dist/（需设置 LIBUSB_DYLIB_X86_64）并安装到 /Applications"
 dir = "."
 run = [
   "xcodebuild -project DJOneHubNative.xcodeproj -scheme DJOneHubNative -configuration Release -destination 'platform=macOS' -derivedDataPath build/DerivedData ARCHS=x86_64 MARKETING_VERSION=0.1.0-alpha PRODUCT_BUNDLE_IDENTIFIER=com.djonehub.native.alpha DISPLAY_NAME=\"DJ4GNative\" build",
@@ -32,10 +38,12 @@ run = [
   "rm -rf dist/DJ4GNative-x86_64.app",
   "cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative-x86_64.app",
   "rm -rf build/DerivedData/Build/Products/Release/DJ4GNative.app",
+  "rm -rf /Applications/DJ4GNative.app",
+  "cp -R dist/DJ4GNative-x86_64.app /Applications/DJ4GNative.app",
 ]
 
 [tasks."build:universal"]
-description = "构建通用包到 dist/（需设置 LIBUSB_DYLIB_ARM64 / LIBUSB_DYLIB_X86_64 指向通用 libusb）"
+description = "构建通用包到 dist/ 并安装到 /Applications"
 dir = "."
 run = [
   "xcodebuild -project DJOneHubNative.xcodeproj -scheme DJOneHubNative -configuration Release -destination 'platform=macOS' -derivedDataPath build/DerivedData ARCHS='arm64 x86_64' MARKETING_VERSION=0.1.0-alpha PRODUCT_BUNDLE_IDENTIFIER=com.djonehub.native.alpha DISPLAY_NAME=\"DJ4GNative\" build",
@@ -43,12 +51,14 @@ run = [
   "rm -rf dist/DJ4GNative.app",
   "cp -R build/DerivedData/Build/Products/Release/DJ4GNative.app dist/DJ4GNative.app",
   "rm -rf build/DerivedData/Build/Products/Release/DJ4GNative.app",
+  "rm -rf /Applications/DJ4GNative.app",
+  "cp -R dist/DJ4GNative.app /Applications/DJ4GNative.app",
 ]
 
 [tasks.launch]
-description = "启动已构建的 app（本机架构优先，其次通用包）"
+description = "启动 /Applications 中的 DJ4GNative（回退 dist）"
 dir = "."
-run = "open dist/DJ4GNative-$(uname -m).app 2>/dev/null || open dist/DJ4GNative.app"
+run = "open /Applications/DJ4GNative.app 2>/dev/null || open dist/DJ4GNative-$(uname -m).app 2>/dev/null || open dist/DJ4GNative.app"
 
 [tasks.kill]
 description = "停止正在运行的 DJ4GNative 及其后端"

@@ -41,7 +41,7 @@ DJOneHub 是 DJI One 4G 模块的原生 macOS 管理应用。成功意味着用�
 
 ## Brand Commitments
 
-- 产品名称保持 `DJOneHub`，界面以简洁、直接的中文为主。
+- 产品名称保持 `DJ4GNative`，界面以简洁、直接的中文为主。
 - 延续当前原生 macOS 信息架构、系统字体、系统颜色和系统控件，不引入独立网页式视觉语言。
 
 ## Evidence on Hand

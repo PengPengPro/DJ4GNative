@@ -330,6 +330,9 @@ struct TrafficSnapshot: Decodable {
     let sessionRX: UInt64?
     let sessionTX: UInt64?
     let sessionTotal: UInt64?
+    let liveInterface: String?
+    let liveRXBytes: UInt64?
+    let liveTXBytes: UInt64?
     let sampledAtMS: Int64?
     let error: String?
 
@@ -340,7 +343,20 @@ struct TrafficSnapshot: Decodable {
         case sessionRX = "session_rx_bytes"
         case sessionTX = "session_tx_bytes"
         case sessionTotal = "session_total_bytes"
+        case liveInterface = "live_interface"
+        case liveRXBytes = "live_rx_bytes"
+        case liveTXBytes = "live_tx_bytes"
         case sampledAtMS = "sampled_at_ms"
+    }
+
+    /// 菜单栏实时速率优先用当前上网通道计数；首页累计流量看模块 session（磁盘持久化）。
+    var liveRateSample: (interfaceName: String?, rxBytes: UInt64, txBytes: UInt64)? {
+        if let liveInterface, !liveInterface.isEmpty,
+           let liveRXBytes, let liveTXBytes {
+            return (liveInterface, liveRXBytes, liveTXBytes)
+        }
+        guard available, let rxBytes, let txBytes else { return nil }
+        return (interface, rxBytes, txBytes)
     }
 }
 
@@ -660,6 +676,7 @@ struct NetworkFailoverStatus: Decodable {
     let pathKind: String?
     let pathLabel: String?
     let usingPreferred: Bool?
+    let usingBackup: Bool?
     let helperReady: Bool?
     let message: String?
     let primaryOnline: Bool?
@@ -671,6 +688,7 @@ struct NetworkFailoverStatus: Decodable {
         case pathKind = "path_kind"
         case pathLabel = "path_label"
         case usingPreferred = "using_preferred"
+        case usingBackup = "using_backup"
         case helperReady = "helper_ready"
         case primaryOnline = "primary_online"
     }

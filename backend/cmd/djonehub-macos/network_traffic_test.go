@@ -76,3 +76,87 @@ func TestSelectModuleTrafficInterfaceDoesNotFallback(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveLiveTrafficInterfacePrefersActiveUnderlay(t *testing.T) {
+	counters := map[string]networkByteCounters{
+		"en0":   {RX: 10, TX: 1},
+		"en8":   {RX: 20, TX: 2},
+		"utun5": {RX: 30, TX: 3},
+	}
+	services := []networkService{
+		{Name: "Wi-Fi", Device: "en0"},
+		{Name: "Baiwang", Device: "en8", USB: true, Module: true},
+		{Name: "Quantumult X", Device: ""},
+	}
+
+	if got := resolveLiveTrafficInterface("en8", services, counters); got != "en8" {
+		t.Fatalf("resolveLiveTrafficInterface(active=en8) = %q, want en8", got)
+	}
+	if got := resolveLiveTrafficInterface("en0", services, counters); got != "en0" {
+		t.Fatalf("resolveLiveTrafficInterface(active=en0) = %q, want en0", got)
+	}
+	if got := resolveLiveTrafficInterface("en0", nil, counters); got != "en0" {
+		t.Fatalf("resolveLiveTrafficInterface(en0) = %q, want en0", got)
+	}
+}
+
+func TestApplyTrafficSamplePersistsAcrossRestart(t *testing.T) {
+	// 首次采样只打基线。
+	state := applyTrafficSample(networkTrafficPersistedState{}, "en8", networkByteCounters{RX: 1000, TX: 100})
+	if state.TotalRX != 0 || state.TotalTX != 0 {
+		t.Fatalf("first sample totals = %+v, want zero", state)
+	}
+
+	// 进程内继续累加。
+	state = applyTrafficSample(state, "en8", networkByteCounters{RX: 1500, TX: 140})
+	if state.TotalRX != 500 || state.TotalTX != 40 {
+		t.Fatalf("after growth totals = rx %d tx %d, want 500/40", state.TotalRX, state.TotalTX)
+	}
+
+	// 模拟重启后从磁盘恢复：累计与 last_* 仍在。
+	restored := state
+	restored = applyTrafficSample(restored, "en8", networkByteCounters{RX: 1800, TX: 200})
+	if restored.TotalRX != 800 || restored.TotalTX != 100 {
+		t.Fatalf("after restart totals = rx %d tx %d, want 800/100", restored.TotalRX, restored.TotalTX)
+	}
+}
+
+func TestApplyTrafficSampleCounterReset(t *testing.T) {
+	state := networkTrafficPersistedState{
+		TotalRX:       5000,
+		TotalTX:       900,
+		LastInterface: "en8",
+		LastRX:        2000,
+		LastTX:        400,
+	}
+	state = applyTrafficSample(state, "en8", networkByteCounters{RX: 50, TX: 10})
+	if state.TotalRX != 5050 || state.TotalTX != 910 {
+		t.Fatalf("after counter reset totals = rx %d tx %d, want 5050/910", state.TotalRX, state.TotalTX)
+	}
+}
+
+func TestApplyTrafficSampleInterfaceRenameKeepsTotals(t *testing.T) {
+	state := networkTrafficPersistedState{
+		TotalRX:       5000,
+		TotalTX:       900,
+		LastInterface: "en8",
+		LastRX:        2000,
+		LastTX:        400,
+	}
+	state = applyTrafficSample(state, "en9", networkByteCounters{RX: 30, TX: 5})
+	if state.TotalRX != 5000 || state.TotalTX != 900 {
+		t.Fatalf("after rename totals = rx %d tx %d, want 5000/900", state.TotalRX, state.TotalTX)
+	}
+	if state.LastInterface != "en9" || state.LastRX != 30 || state.LastTX != 5 {
+		t.Fatalf("after rename baseline = %+v", state)
+	}
+}
+
+func TestCounterDelta(t *testing.T) {
+	if got := counterDelta(100, 150); got != 50 {
+		t.Fatalf("counterDelta(100,150) = %d, want 50", got)
+	}
+	if got := counterDelta(100, 40); got != 40 {
+		t.Fatalf("counterDelta(100,40) = %d, want 40", got)
+	}
+}

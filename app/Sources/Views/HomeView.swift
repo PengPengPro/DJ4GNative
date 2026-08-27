@@ -1,0 +1,1042 @@
+import SwiftUI
+
+/// 首页：模块状态总览（紧凑排版，数据来自共享缓存 DashboardStore）
+struct HomeView: View {
+    @EnvironmentObject private var backend: BackendProcess
+    @EnvironmentObject private var store: DashboardStore
+    @EnvironmentObject private var smsStore: SMSStore
+    @EnvironmentObject private var cliIntegration: CLIIntegrationManager
+    @Environment(\.colorScheme) private var colorScheme
+
+    @State private var showingRebootConfirm = false
+    @State private var copiedValue: String?
+    @State private var draggedService: Int?
+    @State private var showNotifyDeniedAlert = false
+    @State private var autoLaunchEnabled = false
+    @State private var simPinInput = ""
+    @State private var saveSIMPin = true
+    @AppStorage("silentLaunch") private var silentLaunchEnabled = false
+    @AppStorage(DockIconSettings.storageKey) private var showDockIcon = true
+    @AppStorage(MenuBarDisplayOptions.showSignalKey) private var menuBarShowSignal = false
+    @AppStorage(MenuBarDisplayOptions.showDownloadKey) private var menuBarShowDownload = false
+    @AppStorage(MenuBarDisplayOptions.showUploadKey) private var menuBarShowUpload = false
+
+    private var status: DeviceStatus? { store.status }
+    private var health: HealthStatus? { store.health }
+    private var traffic: TrafficSnapshot? { store.traffic }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if cliIntegration.cliUpdateAvailable {
+                    cliUpdateNotice
+                }
+
+                switch backend.state {
+                case .running:
+                    if status != nil {
+                        if status?.simPinRequired == true {
+                            simPinBanner
+                        }
+                        overviewBar
+                        deviceCard
+                        WaterfallLayout(minColumnWidth: 320, spacing: 12) {
+                            trafficCard
+                            launchOptionsCard
+                            smsCard
+                            priorityCard
+                        }
+                    } else if store.statusStale {
+                        VStack(spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 34)).foregroundStyle(.orange)
+                            Text("模块状态获取失败").font(.headline)
+                            Text("请确认模块已连接，然后重试。").font(.callout).foregroundStyle(.secondary)
+                            Button("重试") {
+                                store.refresh()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    } else {
+                        HStack(spacing: 10) {
+                            ProgressView().controlSize(.small)
+                            Text("读取模块状态…").foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 60)
+                    }
+                case .starting:
+                    VStack(spacing: 10) {
+                        ProgressView().controlSize(.small)
+                        Text("正在启动服务…").foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 60)
+                case .stopped:
+                    VStack(spacing: 10) {
+                        Image(systemName: "power").font(.system(size: 34)).foregroundStyle(.tertiary)
+                        Text("服务未运行").font(.headline)
+                        Text("请退出并重新打开应用").font(.callout).foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 60)
+                case .failed(let reason):
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 34)).foregroundStyle(.orange)
+                        Text("服务启动失败").font(.headline)
+                        Text(reason)
+                            .font(.callout).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button("重试") {
+                            backend.start()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: 780)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollIndicators(.visible)
+        .overlay(alignment: .bottomTrailing) {
+            if let toast = store.toast {
+                ToastBubble(toast: toast) {
+                    store.toast = nil
+                }
+                .onHover { hovering in
+                    if hovering {
+                        store.extendToast()
+                    }
+                }
+                .padding(16)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: store.callStatus)
+        .animation(.easeInOut(duration: 0.25), value: store.toast)
+        .onAppear {
+            store.loadServices()
+            autoLaunchEnabled = AutoLaunch.isEnabled
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AutoLaunch.didChangeNotification)) { _ in
+            autoLaunchEnabled = AutoLaunch.isEnabled
+        }
+        .confirmationDialog("重启模块？", isPresented: $showingRebootConfirm, titleVisibility: .visible) {
+            Button("重启（AT+CFUN=1,1）", role: .destructive) { store.reboot() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("模块重启会导致网络临时中断，正在进行的下载或写入操作会被打断。")
+        }
+        .sheet(isPresented: Binding(
+            get: { store.showSIMPinPrompt },
+            set: { store.showSIMPinPrompt = $0 }
+        )) {
+            SIMPinUnlockSheet(
+                pin: $simPinInput,
+                savePin: $saveSIMPin,
+                busy: store.simPinBusy,
+                errorMessage: store.simPinError,
+                onUnlock: {
+                    store.unlockSIMPIN(simPinInput, save: saveSIMPin)
+                },
+                onCancel: {
+                    store.showSIMPinPrompt = false
+                    simPinInput = ""
+                }
+            )
+        }
+        .onChange(of: store.showSIMPinPrompt) { shown in
+            if shown {
+                simPinInput = ""
+                saveSIMPin = true
+            }
+        }
+    }
+
+    // MARK: - SIM PIN 提示
+
+    private var simPinBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "lock.fill")
+                .font(.title3)
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(status?.simPinState == "sim_puk" ? "SIM 需要 PUK" : "SIM 需要 PIN 解锁")
+                    .font(.callout.weight(.semibold))
+                Text(status?.simPinState == "sim_puk"
+                     ? "连续输错 PIN 过多，请使用运营商 PUK 在其他设备解锁后再连接。"
+                     : "当前 SIM 已启用 PIN。解锁成功后可保存，下次自动解锁。")
+                    .font(.caption)
+                    .foregroundStyle(Color.primary.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            if status?.simPinState != "sim_puk" {
+                Button("输入 PIN") {
+                    store.showSIMPinPrompt = true
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(colorScheme == .dark ? 0.12 : 0.08)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1))
+    }
+
+    // MARK: - 顶部概览条
+
+    private var cliUpdateNotice: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.title3)
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("CLI 需要同步")
+                    .font(.callout.weight(.semibold))
+                Text("已安装 \(cliIntegration.installedCLIVersionText ?? "未知版本")，当前 App 内置 \(cliIntegration.bundledCLIVersionText)。同步后 AI 将使用与 App 配套的命令行工具。")
+                    .font(.caption)
+                    .foregroundStyle(Color.primary.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+
+            Spacer(minLength: 8)
+
+            Button("前往同步") {
+                MainWindowRequestCenter.shared.requestOpen(destination: .ai)
+            }
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(colorScheme == .dark ? 0.12 : 0.08)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1))
+    }
+
+    private var overviewBar: some View {
+        HStack(spacing: 14) {
+            if let detail = status?.hardwareStatus, !detail.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("未检测到模块").font(.headline)
+                    Text(detail)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
+            } else {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(status?.operatorName ?? "-")
+                        .font(.headline)
+                    Text("\(status?.regStatusText ?? "-") · 更新于 \(store.lastUpdated?.formatted(date: .omitted, time: .standard) ?? "-")")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+
+                if store.statusStale {
+                    Text("数据已过期")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.15)))
+                        .foregroundStyle(.orange)
+                }
+
+                networkPathBadge
+
+                if let dbm = status?.signalDbm {
+                    HStack(spacing: 6) {
+                        signalBars(dbm: dbm)
+                        Text("\(dbm) dBm").font(.callout.monospacedDigit())
+                    }
+                }
+
+                if let mode = status?.networkMode, !mode.isEmpty {
+                    Text(mode)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(simStatusColor)
+                        .frame(width: 7, height: 7)
+                    Text(simStatusText)
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
+
+                if status?.simPinSaved == true, status?.simPinRequired != true {
+                    Button("清除已存 PIN") {
+                        store.clearSavedSIMPIN()
+                    }
+                    .controlSize(.small)
+                    .disabled(store.simPinBusy)
+                }
+
+                Button("重启模块") {
+                    showingRebootConfirm = true
+                }
+                .controlSize(.small)
+                .disabled(store.busy || store.networkRecovering)
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(
+            colorScheme == .dark
+                ? Color(nsColor: .controlBackgroundColor)
+                : Color.accentColor.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    private var simStatusText: String {
+        if status?.simPinRequired == true {
+            return status?.simPinState == "sim_puk" ? "SIM 需要 PUK" : "SIM 需要 PIN"
+        }
+        if status?.simInserted == true {
+            if status?.simPinSaved == true {
+                return "SIM 已解锁（已保存 PIN）"
+            }
+            return "SIM 已插入"
+        }
+        return "SIM 未插入"
+    }
+
+    private var simStatusColor: Color {
+        if status?.simPinRequired == true { return .orange }
+        if status?.simInserted == true { return .green }
+        return .orange
+    }
+
+    // MARK: - 设备信息
+
+    private var deviceCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("设备信息")
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 6) {
+                row("IMEI", status?.imei ?? "-")
+                row("固件", status?.firmware ?? "-")
+                row("ICCID", status?.iccid ?? "-")
+                row("IMSI", status?.imsi ?? "-")
+                row("AT 端口", health?.port ?? "-")
+                row("eSIM 管理", health?.esimAvailable == true ? "可用" : "不可用")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    // MARK: - 实时流量
+
+    private var trafficCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                sectionTitle("网络与流量")
+                Spacer()
+                if store.busy && !store.networkRecovering {
+                    ProgressView().controlSize(.small)
+                }
+                Button {
+                    store.runCheck4G()
+                } label: {
+                    Text("检查 4G 出口")
+                }
+                .controlSize(.small)
+                .disabled(store.busy || store.networkRecovering)
+                Button(store.usbnetEnabled ? "关闭网卡" : "开启网卡") {
+                    store.usbnetEnabled.toggle()
+                    store.switchMode()
+                }
+                .controlSize(.small)
+                .disabled(store.busy || store.networkRecovering || !store.usbnetLoaded)
+            }
+            if let traffic {
+                if !traffic.available {
+                    networkRecoveryRow(traffic)
+                }
+                HStack(spacing: 16) {
+                    trafficItem("本次下载", trafficMetric(traffic.sessionRX))
+                    Divider().frame(height: 26)
+                    trafficItem("本次上传", trafficMetric(traffic.sessionTX))
+                    Divider().frame(height: 26)
+                    trafficItem("本次总流量", trafficMetric(traffic.sessionTotal))
+                    Divider().frame(height: 26)
+                    trafficItem("网卡累计", trafficMetric(trafficTotal))
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("读取流量数据…").foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 12)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    private func networkRecoveryRow(_ traffic: TrafficSnapshot) -> some View {
+        HStack(spacing: 10) {
+            if store.networkRecovering {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(store.networkRecoveryMessage ?? traffic.error ?? "实时流量不可用")
+                    .font(.callout)
+                Text(store.networkRecovering
+                     ? "模块重启并重新连接通常需要 20–40 秒。"
+                     : store.canRetryNetworkConnection
+                         ? "可以尝试重新连接；恢复期间模块会短暂重启。"
+                         : "请检查模块连接和 USB 网卡状态。")
+                    .font(.caption)
+                    .foregroundStyle(Color.primary.opacity(0.7))
+            }
+
+            Spacer(minLength: 8)
+
+            if store.canRetryNetworkConnection || store.networkRecovering {
+                Button(store.networkRecovering ? "正在连接…" : "重试连接") {
+                    store.retryNetworkConnection()
+                }
+                .controlSize(.small)
+                .disabled(store.networkRecovering || store.busy || !store.callStatus.isIdle)
+                .help(store.callStatus.isIdle
+                      ? "重启 4G 模块并等待网卡恢复"
+                      : "需要在通话空闲时重试")
+                .accessibilityHint("重启 4G 模块并等待网卡恢复")
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.orange.opacity(colorScheme == .dark ? 0.12 : 0.08)))
+    }
+
+    // MARK: - 网卡优先级
+
+    private var priorityCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                sectionTitle("网卡优先级")
+                Spacer()
+                Button("应用顺序") {
+                    store.saveOrder()
+                }
+                .controlSize(.small)
+                .disabled(store.services.count < 2)
+                Button {
+                    store.loadServices()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                .help("刷新服务列表")
+            }
+            if store.servicesLoaded {
+                if store.services.isEmpty {
+                    Text("未读取到网络服务").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 4) {
+                        ForEach(Array(store.services.enumerated()), id: \.element.id) { index, service in
+                            ServiceRowView(
+                                index: index,
+                                service: service,
+                                isDragging: draggedService == index)
+                            .onDrag {
+                                draggedService = index
+                                return NSItemProvider(object: service.name as NSString)
+                            } preview: {
+                                Text(service.name)
+                                    .font(.callout)
+                                    .padding(.horizontal, 12).padding(.vertical, 6)
+                                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accentColor, lineWidth: 1))
+                            }
+                            .onDrop(
+                                of: [.text],
+                                delegate: ServiceDropDelegate(
+                                    destination: index,
+                                    dragged: $draggedService,
+                                    onMove: { from, to in store.moveService(from, to: to) }))
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text("自动故障切换")
+                            .font(.callout)
+                        Text("已开启")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("按 macOS 分层：Wi‑Fi/4G/有线是底层，Quantumult 是上层代理（不关闭）。Wi‑Fi 断网后自动提升 4G。USB 异常时优先 ARP/PDP/射频快修，软重启仅作最后手段。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let failoverMessage = store.networkFailoverMessage {
+                        Text(failoverMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 8) {
+                        Button {
+                            store.clearDiagnosticsLog()
+                        } label: {
+                            Label(
+                                store.diagnosticsClearBusy ? "清空中…" : "清空日志",
+                                systemImage: "trash")
+                        }
+                        .controlSize(.small)
+                        .disabled(store.diagnosticsClearBusy || store.diagnosticsCopyBusy)
+                        .help("清空诊断日志文件与内存环")
+
+                        Button {
+                            store.copyDiagnosticsReport()
+                        } label: {
+                            Label(
+                                store.diagnosticsCopyBusy ? "正在采集…" : "复制诊断日志",
+                                systemImage: "doc.on.doc")
+                        }
+                        .controlSize(.small)
+                        .disabled(store.diagnosticsCopyBusy)
+                        .help("一键复制网络/故障切换状态与日志，发给开发者分析")
+                    }
+                    if let diagnosticsCopyMessage = store.diagnosticsCopyMessage {
+                        Text(diagnosticsCopyMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 10) {
+                        if let orderMessage = store.orderMessage {
+                            Text(orderMessage).font(.caption).foregroundStyle(.green)
+                        }
+                        if let orderError = store.orderError {
+                            Text(orderError).font(.caption).foregroundStyle(.red)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("读取网络服务…").foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+    }
+
+    // MARK: - 短信保存
+
+    private var smsCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("短信保存").font(.callout.bold())
+            switchRow("接管模块短信", isOn: Binding(
+                get: { store.smsAdopt },
+                set: { store.setSMSAdopt($0) }
+            ))
+            switchRow("新短信通知", isOn: $smsStore.notificationsEnabled) {
+                requestNotificationAuth()
+            }
+            if let storage = smsStore.storage {
+                HStack(spacing: 8) {
+                    Text("存储").font(.caption).foregroundStyle(.secondary)
+                    storageBadge("SIM 卡", storage.usage?["SM"])
+                    storageBadge("模块", storage.usage?["ME"])
+                }
+            }
+            Text(store.smsAdopt
+                 ? "已接管：收到的短信会保存到本机，最多保留最新 50 条；SIM 卡与模块中的原始短信不会删除。"
+                 : "未接管：短信保留在 SIM 卡与模块存储中，由模块存储管理。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+        .alert("通知权限被拒绝", isPresented: $showNotifyDeniedAlert) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("请在 系统设置 → 通知 中允许 DJOneHub 的通知后再开启。")
+        }
+    }
+
+    /// 标题在左、开关在右的一行
+    private func switchRow(_ title: String, isOn: Binding<Bool>, onChange: (() -> Void)? = nil) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.callout)
+            Spacer()
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .accessibilityLabel(title)
+                .onChange(of: isOn.wrappedValue) { on in
+                    if on { onChange?() }
+                }
+        }
+    }
+
+    private func storageBadge(_ title: String, _ usage: SMSStorageUsage?) -> some View {
+        guard let usage else {
+            return AnyView(EmptyView())
+        }
+        let full = usage.used >= usage.total && usage.total > 0
+        return AnyView(
+            Text("\(title) \(usage.used)/\(usage.total)")
+                .font(.caption)
+                .foregroundStyle(full ? Color.red : Color.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(Capsule().fill(full ? Color.red.opacity(0.12) : Color.gray.opacity(0.12)))
+        )
+    }
+
+    private func requestNotificationAuth() {
+        Task {
+            if await !smsStore.ensureAuthorization() {
+                smsStore.notificationsEnabled = false
+                showNotifyDeniedAlert = true
+            }
+        }
+    }
+
+    private func setAutoLaunch(_ enabled: Bool) {
+        do {
+            try AutoLaunch.setEnabled(enabled)
+            autoLaunchEnabled = enabled
+            store.toast = ToastItem(message: enabled ? "已开启开机自启，下次登录自动在后台运行" : "已关闭开机自启", isSuccess: true)
+        } catch {
+            autoLaunchEnabled = AutoLaunch.isEnabled
+            store.toast = ToastItem(message: "设置失败：\(error.localizedDescription)", isSuccess: false, title: "开机自启")
+        }
+    }
+
+    private func setSilentLaunch(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "silentLaunch")
+        silentLaunchEnabled = enabled
+        store.toast = ToastItem(
+            message: enabled
+                ? "已开启静默启动：下次启动不弹主窗口，点 Dock 或菜单栏「打开主界面」可显示"
+                : "已关闭静默启动：下次启动会显示主窗口",
+            isSuccess: true)
+    }
+
+    private func setShowDockIcon(_ enabled: Bool) {
+        showDockIcon = enabled
+        DockIconSettings.setEnabled(enabled)
+        store.toast = ToastItem(
+            message: enabled ? "已显示 Dock 图标，可从程序坞找到本应用" : "已隐藏 Dock 图标，仅保留菜单栏",
+            isSuccess: true,
+            title: "Dock 图标"
+        )
+    }
+
+    // MARK: - 启动选项
+
+    private var launchOptionsCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("应用设置").font(.callout.bold())
+
+            switchRow("开机自启", isOn: Binding(
+                get: { autoLaunchEnabled },
+                set: { setAutoLaunch($0) }
+            ))
+            .help("登录系统后自动在后台运行")
+
+            switchRow("静默启动", isOn: Binding(
+                get: { silentLaunchEnabled },
+                set: { setSilentLaunch($0) }
+            ))
+            .help("启动时不自动弹出主窗口（仅菜单栏/后台）。要点 Dock 图标或菜单栏「打开主界面」才会显示窗口；不是卡住。")
+
+            switchRow("显示 Dock 图标", isOn: Binding(
+                get: { showDockIcon },
+                set: { setShowDockIcon($0) }
+            ))
+            .help("在程序坞显示应用图标，方便找回；关闭后仅保留菜单栏")
+
+            Divider().padding(.vertical, 2)
+
+            Text("菜单栏显示").font(.callout.bold())
+
+            switchRow("信号强度", isOn: $menuBarShowSignal)
+                .help("使用四级信号图标显示当前蜂窝信号强度")
+
+            switchRow("下载速率", isOn: $menuBarShowDownload)
+                .help("在菜单栏显示实时下载速率（与上传速率上下两行显示）")
+
+            switchRow("上传速率", isOn: $menuBarShowUpload)
+                .help("在菜单栏显示实时上传速率（与下载速率上下两行显示）")
+
+            Text("全部关闭时，仅显示原来的应用图标（默认）。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+        .onChange(of: menuBarShowSignal) { _ in
+            notifyMenuBarDisplayOptionsChanged()
+        }
+        .onChange(of: menuBarShowDownload) { _ in
+            notifyMenuBarDisplayOptionsChanged()
+        }
+        .onChange(of: menuBarShowUpload) { _ in
+            notifyMenuBarDisplayOptionsChanged()
+        }
+    }
+
+    private func notifyMenuBarDisplayOptionsChanged() {
+        NotificationCenter.default.post(
+            name: MenuBarDisplayOptions.didChangeNotification, object: nil)
+    }
+
+    // MARK: - 组件
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title).font(.callout.bold())
+    }
+
+    private func row(_ key: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(key)
+                .foregroundStyle(.secondary)
+                .frame(width: 56, alignment: .leading)
+            Button {
+                copyValue(value)
+            } label: {
+                Text(copiedValue == value ? "已复制 ✓" : value)
+                    .foregroundStyle(copiedValue == value ? Color.green : Color.primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("点击复制")
+        }
+        .font(.callout)
+    }
+
+    private func copyValue(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        copiedValue = value
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            if copiedValue == value {
+                copiedValue = nil
+            }
+        }
+    }
+
+    private func trafficItem(_ title: String, _ value: String) -> some View {
+        VStack(spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.headline.monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var networkPathBadge: some View {
+        let kind = store.networkPathKind ?? ""
+        let label = store.networkPathLabel ?? store.networkPathService
+        if !kind.isEmpty || label != nil {
+            HStack(spacing: 4) {
+                Image(systemName: NetworkPathIcons.symbolName(for: kind))
+                    .font(.caption)
+                Text(NetworkPathIcons.shortTitle(kind: kind, label: label))
+                    .font(.caption.bold())
+            }
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(Capsule().fill(NetworkPathIcons.tint(for: kind).opacity(0.16)))
+            .foregroundStyle(NetworkPathIcons.tint(for: kind))
+            .help(store.networkFailoverMessage ?? "当前系统默认上网通道")
+        }
+    }
+
+    private func signalBars(dbm: Int) -> some View {
+        let level: Int
+        switch dbm {
+        case ..<(-100): level = 0
+        case ..<(-90): level = 1
+        case ..<(-80): level = 2
+        case ..<(-65): level = 3
+        default: level = 4
+        }
+        return HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<4, id: \.self) { i in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(i < level ? Color.green : Color.gray.opacity(0.35))
+                    .frame(width: 3, height: CGFloat(5 + i * 3))
+            }
+        }
+    }
+
+    private func formatBytes(_ bytes: UInt64?) -> String {
+        guard let bytes else { return "-" }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .binary
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        return formatter.string(fromByteCount: Int64(bytes))
+    }
+
+    /// 网卡不可用时显示 "-"，避免后端返回的 0 值造成误导
+    private func trafficMetric(_ bytes: UInt64?) -> String {
+        guard traffic?.available == true else { return "-" }
+        return formatBytes(bytes)
+    }
+
+    private var trafficTotal: UInt64? {
+        guard let rx = traffic?.rxBytes, let tx = traffic?.txBytes else { return nil }
+        return rx + tx
+    }
+}
+
+/// 提示气泡
+struct ToastBubble: View {
+    let toast: ToastItem
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: toast.icon ?? (toast.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill"))
+                .foregroundStyle(toast.isSuccess ? .green : .red)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(toast.title ?? (toast.isSuccess ? "检查完成" : "检查失败"))
+                    .font(.callout.bold())
+                Text(toast.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 8)
+            Button {
+                onClose()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("关闭")
+        }
+        .padding(12)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .windowBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+    }
+}
+
+/// 网卡优先级单行视图
+struct ServiceRowView: View {
+    let index: Int
+    let service: NetworkService
+    let isDragging: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Text("\(index + 1)")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 18, alignment: .leading)
+            Text(service.name)
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            badge
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isDragging ? Color.accentColor.opacity(0.12) : Color.clear))
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var badge: some View {
+        if service.module == true {
+            Text("模块网卡")
+                .font(.caption2.bold())
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(Color.green.opacity(0.18)))
+                .foregroundStyle(.green)
+        } else if service.usb == true {
+            Text("USB")
+                .font(.caption2.bold())
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(Color.accentColor.opacity(0.15)))
+                .foregroundStyle(Color.accentColor)
+        }
+    }
+}
+
+/// 网卡优先级行的拖拽排序代理
+struct ServiceDropDelegate: DropDelegate {
+    let destination: Int
+    @Binding var dragged: Int?
+    let onMove: (Int, Int) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let from = dragged, from != destination else { return }
+        withAnimation(.easeOut(duration: 0.12)) {
+            onMove(from, destination)
+        }
+        dragged = destination
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragged = nil
+        return true
+    }
+}
+
+/// 瀑布流布局：按可用宽度自适应分列，每个子视图放入当前最矮的一列，保持各自自然高度
+struct WaterfallLayout: Layout {
+    var minColumnWidth: CGFloat
+    var spacing: CGFloat = 12
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 780
+        let columns = columnCount(for: width)
+        let columnWidth = (width - CGFloat(columns - 1) * spacing) / CGFloat(columns)
+        var heights = [CGFloat](repeating: 0, count: columns)
+        for subview in subviews {
+            let size = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
+            let index = heights.indices.min { heights[$0] < heights[$1] }!
+            heights[index] += size.height + spacing
+        }
+        let height = (heights.max() ?? 0) - (subviews.isEmpty ? 0 : spacing)
+        return CGSize(width: width, height: max(0, height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let columns = columnCount(for: bounds.width)
+        let columnWidth = (bounds.width - CGFloat(columns - 1) * spacing) / CGFloat(columns)
+        var xOffsets = (0..<columns).map { CGFloat($0) * (columnWidth + spacing) }
+        var heights = [CGFloat](repeating: 0, count: columns)
+        for subview in subviews {
+            let size = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil))
+            let index = heights.indices.min { heights[$0] < heights[$1] }!
+            subview.place(
+                at: CGPoint(x: bounds.minX + xOffsets[index], y: bounds.minY + heights[index]),
+                proposal: ProposedViewSize(size))
+            heights[index] += size.height + spacing
+        }
+    }
+
+    private func columnCount(for width: CGFloat) -> Int {
+        max(1, Int((width + spacing) / (minColumnWidth + spacing)))
+    }
+}
+
+/// SIM PIN 解锁弹窗
+private struct SIMPinUnlockSheet: View {
+    @Binding var pin: String
+    @Binding var savePin: Bool
+    let busy: Bool
+    let errorMessage: String?
+    let onUnlock: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("解锁 SIM 卡")
+                .font(.title3.weight(.semibold))
+            Text("当前 SIM 需要输入 PIN。解锁成功后可保存，下次模块开机时自动解锁。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            SecureField("输入 4–8 位 PIN", text: $pin)
+                .textFieldStyle(.roundedBorder)
+                .disabled(busy)
+                .onSubmit {
+                    if canSubmit { onUnlock() }
+                }
+
+            Toggle("解锁成功后保存 PIN，下次自动解锁", isOn: $savePin)
+                .disabled(busy)
+
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(busy)
+                Button {
+                    onUnlock()
+                } label: {
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text("解锁")
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSubmit || busy)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+    }
+
+    private var canSubmit: Bool {
+        pin.range(of: #"^\d{4,8}$"#, options: .regularExpression) != nil
+    }
+}

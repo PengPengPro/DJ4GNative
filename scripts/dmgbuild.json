@@ -1,0 +1,43 @@
+{
+  "title": "DJOneHub",
+  "volume_name": "DJOneHub",
+  "format": "UDZO",
+  "background": "scripts/dmg-background.png",
+  "files": [],
+  "symlinks": {
+    "Applications": "/Applications"
+  },
+  "window": {
+    "position": {
+      "x": 200,
+      "y": 150
+    },
+    "size": {
+      "width": 660,
+      "height": 440
+    }
+  },
+  "icon-size": 112,
+  "contents": [
+    {
+      "x": 180,
+      "y": 228,
+      "type": "file",
+      "path": "dist/DJOneHub-arm64.app",
+      "name": "DJOneHub.app"
+    },
+    {
+      "x": 480,
+      "y": 228,
+      "type": "link",
+      "path": "/Applications"
+    },
+    {
+      "x": 330,
+      "y": 1000,
+      "type": "position",
+      "path": ".background.tiff",
+      "hidden": true
+    }
+  ]
+}

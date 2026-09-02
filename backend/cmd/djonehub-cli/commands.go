@@ -155,16 +155,29 @@ func deviceCommand(ctx context.Context, options globalOptions, args []string) (c
 }
 
 func networkCommand(ctx context.Context, options globalOptions, args []string) (commandResult, *commandError) {
-	if len(args) != 1 {
-		return commandResult{Command: "network"}, usageError("usage: djonehub network status|traffic")
+	if len(args) == 0 {
+		return commandResult{Command: "network"}, usageError("usage: djonehub network status|traffic [apps [date]]")
 	}
 	switch args[0] {
 	case "status":
+		if len(args) != 1 {
+			return commandResult{Command: "network"}, usageError("usage: djonehub network status")
+		}
 		return getCommand(ctx, options, "network.status", "/api/network")
 	case "traffic":
-		return getCommand(ctx, options, "network.traffic", "/api/network/traffic")
+		if len(args) == 1 {
+			return getCommand(ctx, options, "network.traffic", "/api/network/traffic")
+		}
+		if args[1] == "apps" {
+			path := "/api/network/traffic/apps"
+			if len(args) > 2 {
+				path += "?date=" + args[2]
+			}
+			return getCommand(ctx, options, "network.traffic.apps", path)
+		}
+		return commandResult{Command: "network"}, usageError("usage: djonehub network traffic [apps [date]]")
 	default:
-		return commandResult{Command: "network"}, usageError("usage: djonehub network status|traffic")
+		return commandResult{Command: "network"}, usageError("usage: djonehub network status|traffic [apps [date]]")
 	}
 }
 

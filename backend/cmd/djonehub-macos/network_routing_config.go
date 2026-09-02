@@ -421,6 +421,7 @@ func buildIndependentCoreConfig(
 	module routingInterfaceInfo,
 	systemInterface string,
 	systemSOCKSBypassPatterns []string,
+	clashAPISecret string,
 ) ([]byte, error) {
 	config, err := normalizeRoutingConfig(config)
 	if err != nil {
@@ -559,6 +560,7 @@ func buildIndependentCoreConfig(
 			"final": "module-dns",
 		}
 	}
+	appendRoutingClashAPIConfig(coreConfig, clashAPISecret)
 	return json.MarshalIndent(coreConfig, "", "  ")
 }
 
@@ -692,7 +694,7 @@ func routingProcessPathPattern(processPath string) string {
 	return "^" + regexp.QuoteMeta(processPath) + "$"
 }
 
-func buildClashManagedCoreConfig(config routingConfig, module routingInterfaceInfo) ([]byte, error) {
+func buildClashManagedCoreConfig(config routingConfig, module routingInterfaceInfo, clashAPISecret string) ([]byte, error) {
 	config, err := normalizeRoutingConfig(config)
 	if err != nil {
 		return nil, err
@@ -708,6 +710,7 @@ func buildClashManagedCoreConfig(config routingConfig, module routingInterfaceIn
 		"outbounds": []map[string]any{buildModuleDirectOutbound(module)},
 		"route":     map[string]any{"final": "module-direct"},
 	}
+	appendRoutingClashAPIConfig(coreConfig, clashAPISecret)
 	return json.MarshalIndent(coreConfig, "", "  ")
 }
 

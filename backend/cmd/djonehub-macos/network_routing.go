@@ -51,6 +51,7 @@ type routingManager struct {
 	coreLogPath     string
 	corePath        string
 	helperPath      string
+	clashAPISecret  string
 	userHome        string
 	config          routingConfig
 	runtime         routingRuntime
@@ -78,6 +79,7 @@ func newRoutingManager(dataDir string) *routingManager {
 		coreLogPath:    filepath.Join(dataDir, "network-core.log"),
 		corePath:       corePath,
 		helperPath:     helperPath,
+		clashAPISecret: randomRoutingClashAPISecret(),
 		userHome:       os.Getenv("HOME"),
 		config:         loadRoutingConfig(filepath.Join(dataDir, "network-routing.json")),
 		runtime: routingRuntime{
@@ -261,9 +263,10 @@ func (m *routingManager) Start(ctx context.Context, moduleProduct string) (routi
 			*preflight.ModuleInterface,
 			preflight.SystemInterface,
 			preflight.SystemSOCKSBypassPatterns,
+			m.clashAPISecret,
 		)
 	} else {
-		coreConfig, err = buildClashManagedCoreConfig(config, *preflight.ModuleInterface)
+		coreConfig, err = buildClashManagedCoreConfig(config, *preflight.ModuleInterface, m.clashAPISecret)
 	}
 	if err != nil {
 		return fail(http.StatusBadRequest, err)

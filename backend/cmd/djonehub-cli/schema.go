@@ -20,6 +20,7 @@ var commandSchemas = []commandSchema{
 	{Command: "device status", Description: "Read modem and SIM status.", Scope: "device.read"},
 	{Command: "network status", Description: "Read network diagnostics.", Scope: "network.read"},
 	{Command: "network traffic", Description: "Read current network traffic counters.", Scope: "network.read"},
+	{Command: "network traffic apps", Description: "Read per-app traffic usage; optional date YYYY-MM-DD.", Scope: "network.read"},
 	{Command: "sms list", Description: "List SMS metadata; use sms get for exact content.", Scope: "sms.read", Arguments: map[string]string{"--limit": "1..100, default 20"}},
 	{Command: "sms get", Description: "Read one SMS by stable ID.", Scope: "sms.read", Arguments: map[string]string{"--id": "required stable SMS ID"}},
 	{Command: "sms send", Description: "Send one SMS.", Scope: "sms.send", Mutating: true, Confirmation: true, Arguments: map[string]string{"--to": "required phone number", "--message": "message text", "--message-file": "UTF-8 file path", "--request-id": "idempotency key", "--dry-run": "validate without sending", "--yes": "confirm execution"}},

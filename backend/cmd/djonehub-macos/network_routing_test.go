@@ -209,6 +209,7 @@ func TestBuildIndependentCoreConfigKeepsThreeExitsSeparate(t *testing.T) {
 		testRoutingModuleInterface(),
 		"en7",
 		nil,
+		"test-secret",
 	)
 	if err != nil {
 		t.Fatalf("build config: %v", err)
@@ -309,6 +310,7 @@ func TestBuildIndependentCoreConfigUsesSelectedDefaultExit(t *testing.T) {
 				testRoutingModuleInterface(),
 				"en7",
 				testCase.bypassPatterns,
+				"test-secret",
 			)
 			if err != nil {
 				t.Fatalf("build config: %v", err)
@@ -354,6 +356,7 @@ func TestBuildIndependentCoreConfigPrioritizesLocalSOCKSProcessBypass(t *testing
 		testRoutingModuleInterface(),
 		"en7",
 		[]string{bypassPattern},
+		"test-secret",
 	)
 	if err != nil {
 		t.Fatalf("build config: %v", err)
@@ -381,6 +384,7 @@ func TestBuildIndependentCoreConfigRequiresLocalSOCKSProcessBypass(t *testing.T)
 		testRoutingModuleInterface(),
 		"en7",
 		nil,
+		"test-secret",
 	)
 	if err == nil || !strings.Contains(err.Error(), "进程旁路") {
 		t.Fatalf("error=%v, want missing local SOCKS process bypass", err)
@@ -396,6 +400,7 @@ func TestBuildIndependentCoreConfigAllowsRemoteSOCKSDefaultWithoutProcessBypass(
 		testRoutingModuleInterface(),
 		"en7",
 		nil,
+		"test-secret",
 	)
 	if err != nil {
 		t.Fatalf("build config: %v", err)
@@ -461,7 +466,7 @@ func TestResolveLoopbackSOCKSBypassPatternsFindsListenerOwner(t *testing.T) {
 }
 
 func TestBuildClashManagedCoreConfigHasNoTUN(t *testing.T) {
-	data, err := buildClashManagedCoreConfig(defaultRoutingConfig(), testRoutingModuleInterface())
+	data, err := buildClashManagedCoreConfig(defaultRoutingConfig(), testRoutingModuleInterface(), "test-secret")
 	if err != nil {
 		t.Fatalf("build config: %v", err)
 	}
@@ -515,15 +520,15 @@ func TestGeneratedRoutingConfigsPassPinnedCoreCheck(t *testing.T) {
 		build func() ([]byte, error)
 	}{
 		{name: "independent", build: func() ([]byte, error) {
-			return buildIndependentCoreConfig(independent, module, "en7", nil)
+			return buildIndependentCoreConfig(independent, module, "en7", nil, "test-secret")
 		}},
 		{name: "independent-module-default", build: func() ([]byte, error) {
-			return buildIndependentCoreConfig(moduleDefault, module, "en7", nil)
+			return buildIndependentCoreConfig(moduleDefault, module, "en7", nil, "test-secret")
 		}},
 		{name: "independent-socks-default", build: func() ([]byte, error) {
-			return buildIndependentCoreConfig(socksDefault, module, "en7", bypassPatterns)
+			return buildIndependentCoreConfig(socksDefault, module, "en7", bypassPatterns, "test-secret")
 		}},
-		{name: "clash", build: func() ([]byte, error) { return buildClashManagedCoreConfig(clash, module) }},
+		{name: "clash", build: func() ([]byte, error) { return buildClashManagedCoreConfig(clash, module, "test-secret") }},
 	}
 
 	for _, testCase := range testCases {
@@ -579,6 +584,7 @@ func TestGeneratedIndependentConfigPassesRoutingHelperCheck(t *testing.T) {
 				testRoutingModuleInterface(),
 				"en7",
 				testCase.bypassPatterns,
+				"test-secret",
 			)
 			if err != nil {
 				t.Fatalf("build config: %v", err)

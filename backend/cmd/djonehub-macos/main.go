@@ -143,6 +143,10 @@ type app struct {
 	trafficMu    sync.Mutex
 	trafficStats networkTrafficPersistedState
 
+	appTrafficMu         sync.Mutex
+	appTrafficStats      appTrafficPersistedState
+	appTrafficCollector  appTrafficCollectorScratch
+
 	// 分应用网络出口：配置默认关闭，运行时由独立页面显式启停。
 	routing *routingManager
 
@@ -843,6 +847,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/at", a.executeAT)
 	mux.HandleFunc("GET /api/network", a.networkDiagnostic)
 	mux.HandleFunc("GET /api/network/traffic", a.networkTraffic)
+	mux.HandleFunc("GET /api/network/traffic/apps", a.networkAppTraffic)
 	mux.HandleFunc("POST /api/network/check-4g", a.check4GRoute)
 	mux.HandleFunc("GET /api/network/services", a.listNetworkServices)
 	mux.HandleFunc("PUT /api/network/services-order", a.setNetworkServicesOrder)
@@ -1527,6 +1532,8 @@ func (a *app) initSMSArchive() {
 	a.diagLog.Log("backend: data dir ready at %s", dir)
 	a.initNetworkFailover()
 	a.initTrafficStats()
+	a.initAppTrafficStats()
+	a.startAppTrafficCollector()
 	a.ensureSIMPINStore()
 	// 恢复接管模式状态
 	if data, err := os.ReadFile(filepath.Join(dir, "sms-adopt.json")); err == nil {

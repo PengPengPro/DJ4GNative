@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// 应用分流是显式启用的会话级能力：配置会保存，运行状态不会跨应用重启恢复。
 struct TrafficRoutingView: View {
-    @StateObject private var store = RoutingStore()
+    @EnvironmentObject private var store: RoutingStore
     @State private var copiedClashConfig = false
     @State private var showingUninstallConfirmation = false
 

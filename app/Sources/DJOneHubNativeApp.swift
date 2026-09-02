@@ -86,6 +86,7 @@ private final class AppDependencies: ObservableObject {
     let attentionStore: AttentionStore
     let updateChecker: UpdateChecker
     let cliIntegration: CLIIntegrationManager
+    let routingStore: RoutingStore
 
     init() {
         let backend = BackendProcess.shared
@@ -95,6 +96,7 @@ private final class AppDependencies: ObservableObject {
         attentionStore = .shared
         updateChecker = .shared
         cliIntegration = CLIIntegrationManager()
+        routingStore = RoutingStore()
     }
 }
 
@@ -143,7 +145,8 @@ private struct DJOneHubMenuBarScene: Scene {
                 smsStore: dependencies.smsStore,
                 attentionStore: dependencies.attentionStore,
                 updateChecker: dependencies.updateChecker,
-                cliIntegration: dependencies.cliIntegration)
+                cliIntegration: dependencies.cliIntegration,
+                routingStore: dependencies.routingStore)
         } label: {
             MenuBarStatusLabel(
                 appDelegate: appDelegate,
@@ -167,6 +170,7 @@ private struct MainAppContent: View {
             .environmentObject(dependencies.attentionStore)
             .environmentObject(dependencies.updateChecker)
             .environmentObject(dependencies.cliIntegration)
+            .environmentObject(dependencies.routingStore)
             .frame(minWidth: 760, minHeight: 480)
             .onAppear {
                 appDelegate.bindDashboardStore(dependencies.store)
@@ -983,6 +987,7 @@ private struct MenuBarDashboardPanel: View {
     @ObservedObject var attentionStore: AttentionStore
     @ObservedObject var updateChecker: UpdateChecker
     @ObservedObject var cliIntegration: CLIIntegrationManager
+    @ObservedObject var routingStore: RoutingStore
 
     @AppStorage(MenuBarDisplayOptions.showSignalKey) private var menuBarShowSignal = false
     @AppStorage(MenuBarDisplayOptions.showDownloadKey) private var menuBarShowDownload = false
@@ -993,7 +998,6 @@ private struct MenuBarDashboardPanel: View {
     @State private var autoLaunchEnabled = false
     @State private var requestingNotificationPermission = false
     @StateObject private var trafficHistory = MenuBarTrafficHistory()
-    @StateObject private var routingStore = RoutingStore()
 
     private var presentation: MenuBarPresentation {
         appDelegate.menuBarPresentation

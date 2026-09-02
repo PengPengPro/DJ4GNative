@@ -300,10 +300,17 @@ final class RoutingStore: ObservableObject {
             bundlePath: bundlePath,
             executablePath: executableURL.resolvingSymlinksInPath().path,
             action: .moduleDirect))
+        scheduleApplicationListSave()
     }
 
     func removeApplication(id: String) {
         config.applications.removeAll { $0.id == id }
+        scheduleApplicationListSave()
+    }
+
+    private func scheduleApplicationListSave() {
+        guard isLoaded, !runtime.enabled, !isSwitching, !isUninstalling else { return }
+        Task { _ = await save() }
     }
 
     func copyClashConfiguration() {

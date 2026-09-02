@@ -360,6 +360,44 @@ struct TrafficSnapshot: Decodable {
     }
 }
 
+/// GET /api/network/traffic/apps
+struct AppTrafficUsageResponse: Decodable {
+    let date: String?
+    let from: String?
+    let to: String?
+    let apps: [AppTrafficUsageItem]
+    let totalRXBytes: UInt64
+    let totalTXBytes: UInt64
+    let totalBytes: UInt64
+    let updatedAt: Date?
+    let sampling: String?
+
+    enum CodingKeys: String, CodingKey {
+        case date, from, to, apps, sampling
+        case totalRXBytes = "total_rx_bytes"
+        case totalTXBytes = "total_tx_bytes"
+        case totalBytes = "total_bytes"
+        case updatedAt = "updated_at"
+    }
+}
+
+struct AppTrafficUsageItem: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let bundlePath: String?
+    let rxBytes: UInt64
+    let txBytes: UInt64
+    let totalBytes: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case bundlePath = "bundle_path"
+        case rxBytes = "rx_bytes"
+        case txBytes = "tx_bytes"
+        case totalBytes = "total_bytes"
+    }
+}
+
 /// POST /api/network/check-4g、check-proxy
 struct CheckResult: Decodable {
     let ok: Bool

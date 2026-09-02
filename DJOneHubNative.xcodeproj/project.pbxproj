@@ -13,6 +13,8 @@
 		19688E1CE9B8EC8D2F96AC37 /* IncomingCallCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2E57514CD06B3BE5E853F33 /* IncomingCallCard.swift */; };
 		2C788B2C3DB18A39F719ED9B /* CLIIntegrationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA57E602C5FB2F698C97DE0B /* CLIIntegrationManager.swift */; };
 		32737C7137357EA4DB902286 /* TrafficRoutingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBEB127E5FB81A8F005E5AD4 /* TrafficRoutingView.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* TrafficStatsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F60718293A4B5C6D /* TrafficStatsStore.swift */; };
+		C3D4E5F60718293A4B5C6D7E /* TrafficStatsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293A4B5C6D7E8F /* TrafficStatsView.swift */; };
 		37D77738BD76FD01E4729F8B /* DJOneHubNativeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52CB97D70CF5A0A3680E4366 /* DJOneHubNativeApp.swift */; };
 		3B9EFAA1F7819AB214C13037 /* Awesome in Frameworks */ = {isa = PBXBuildFile; productRef = 7030065311E07B566AFA804E /* Awesome */; };
 		3D8A2111B885E70C6147874B /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6A07D7E5C03CF4CC05E28A3 /* UpdateChecker.swift */; };
@@ -61,6 +63,8 @@
 		B0747434AEA6A6C68C4D3FA4 /* ESIMQRCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ESIMQRCode.swift; sourceTree = "<group>"; };
 		BA57E602C5FB2F698C97DE0B /* CLIIntegrationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIIntegrationManager.swift; sourceTree = "<group>"; };
 		BBEB127E5FB81A8F005E5AD4 /* TrafficRoutingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficRoutingView.swift; sourceTree = "<group>"; };
+		B2C3D4E5F60718293A4B5C6D /* TrafficStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficStatsStore.swift; sourceTree = "<group>"; };
+		D4E5F60718293A4B5C6D7E8F /* TrafficStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TrafficStatsView.swift; sourceTree = "<group>"; };
 		C06A5E003D640BB7E8549F26 /* AudioBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioBridge.swift; sourceTree = "<group>"; };
 		C0C9E1750A28B9B4C02C072B /* AutoLaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoLaunch.swift; sourceTree = "<group>"; };
 		C1A480439FB5558538B8B6E0 /* RoutingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingStore.swift; sourceTree = "<group>"; };
@@ -127,6 +131,7 @@
 				AA4E2ADFBEE34D33B207BBA4 /* RoutingModels.swift */,
 				C1A480439FB5558538B8B6E0 /* RoutingStore.swift */,
 				C5FE558AD4FEF1919375198D /* SMSStore.swift */,
+				B2C3D4E5F60718293A4B5C6D /* TrafficStatsStore.swift */,
 				8F658F8040ABB05665E2861A /* UnixSocketURLProtocol.swift */,
 				E6A07D7E5C03CF4CC05E28A3 /* UpdateChecker.swift */,
 				CA27A747353F02B60264B190 /* Views */,
@@ -163,6 +168,7 @@
 				DC11388FA67B835A55D6B961 /* HomeView.swift */,
 				1FE8CEA7FD366A18D63D79BB /* SMSView.swift */,
 				BBEB127E5FB81A8F005E5AD4 /* TrafficRoutingView.swift */,
+				D4E5F60718293A4B5C6D7E8F /* TrafficStatsView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -304,6 +310,8 @@
 				CCDD69D5E523420BC2C5E3EE /* SMSStore.swift in Sources */,
 				7132C6870A22C6E7C3CD0A9D /* SMSView.swift in Sources */,
 				32737C7137357EA4DB902286 /* TrafficRoutingView.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* TrafficStatsStore.swift in Sources */,
+				C3D4E5F60718293A4B5C6D7E /* TrafficStatsView.swift in Sources */,
 				E7EBC99E07FAFF36998EB28F /* UnixSocketURLProtocol.swift in Sources */,
 				3D8A2111B885E70C6147874B /* UpdateChecker.swift in Sources */,
 			);
